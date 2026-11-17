@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klipcart",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-11-17",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "R2_ACCOUNT_ID": "REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID",
+    "R2_BUCKET_NAME": "klipcart-studio-data"
+  },
+  "containers": [
+    {
+      "class_name": "KlipCartContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "name": "klipcart-container"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "KlipCartContainer",
+        "name": "KLIPCART_CONTAINER"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["KlipCartContainer"],
+      "tag": "v1"
+    }
+  ]
+}

@@ -129,6 +129,14 @@ export interface GenerationJob {
 
 const jobMap = new Map<string, GenerationJob>();
 
+function persistJob(job: GenerationJob) {
+  ensureDirs();
+  fs.writeFileSync(
+    path.join(JOBS_DIR, `${job.id}.json`),
+    JSON.stringify(job, null, 2)
+  );
+}
+
 export function createJob(
   job: Omit<GenerationJob, "id" | "createdAt" | "updatedAt">
 ): GenerationJob {
@@ -142,27 +150,44 @@ export function createJob(
     updatedAt: now,
   };
   jobMap.set(id, full);
+  persistJob(full);
   return full;
 }
 
 export function getJob(id: string): GenerationJob | null {
   const safe = sanitizeId(id);
   if (!safe) return null;
-  return jobMap.get(safe) || null;
+  const cached = jobMap.get(safe);
+  if (cached) return cached;
+
+  ensureDirs();
+  const jobPath = path.join(JOBS_DIR, `${safe}.json`);
+  if (!fs.existsSync(jobPath)) return null;
+  try {
+    const stored = JSON.parse(fs.readFileSync(jobPath, "utf8")) as GenerationJob;
+    if (stored.id !== safe) return null;
+    jobMap.set(safe, stored);
+    return stored;
+  } catch {
+    return null;
+  }
 }
 
 export function updateJob(
   id: string,
   patch: Partial<Omit<GenerationJob, "id" | "createdAt">>
 ): GenerationJob | null {
-  const existing = jobMap.get(id);
+  const safe = sanitizeId(id);
+  if (!safe) return null;
+  const existing = getJob(safe);
   if (!existing) return null;
   const updated: GenerationJob = {
     ...existing,
     ...patch,
     updatedAt: new Date().toISOString(),
   };
-  jobMap.set(id, updated);
+  jobMap.set(safe, updated);
+  persistJob(updated);
   return updated;
 }
 
