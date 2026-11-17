@@ -1,19 +1,22 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { sanitizeFilename, sanitizeId } from "./validation.js";
+import { Buffer } from "node:buffer";
+import type {
+  ByteRangeRequest,
+  StorageBackend,
+  StoredBinaryObject,
+} from "./storageAdapter.js";
+import {
+  ALLOWED_ASSET_MIMES,
+  MAX_ASSET_BYTES,
+  sanitizeFilename,
+  sanitizeId,
+} from "./validation.js";
 
-const DATA_DIR = path.resolve(process.cwd(), ".studio-data");
-const PROJECTS_DIR = path.join(DATA_DIR, "projects");
-const JOBS_DIR = path.join(DATA_DIR, "jobs");
-const USAGE_FILE = path.join(DATA_DIR, "usage.json");
+const USAGE_KEY = "usage.json";
 
-function ensureDirs() {
-  for (const dir of [DATA_DIR, PROJECTS_DIR, JOBS_DIR]) {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  }
+function randomHex(byteCount: number): string {
+  const bytes = new Uint8Array(byteCount);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export type UsageOperationType =
@@ -44,25 +47,29 @@ export interface UsageStats {
   recentLogs: UsageLogEntry[];
 }
 
-const DEFAULT_USAGE: UsageStats = {
-  analysisCalls: 0,
-  copyCalls: 0,
-  imageGenCalls: 0,
-  videoGenCalls: 0,
-  ttsCalls: 0,
-  errors: 0,
-  lastUpdated: new Date().toISOString(),
-  recentLogs: [],
-};
+function defaultUsage(): UsageStats {
+  return {
+    analysisCalls: 0,
+    copyCalls: 0,
+    imageGenCalls: 0,
+    videoGenCalls: 0,
+    ttsCalls: 0,
+    errors: 0,
+    lastUpdated: new Date().toISOString(),
+    recentLogs: [],
+  };
+}
 
-export function getUsageStats(): UsageStats {
-  ensureDirs();
-  if (!fs.existsSync(USAGE_FILE)) {
-    fs.writeFileSync(USAGE_FILE, JSON.stringify(DEFAULT_USAGE, null, 2));
-    return { ...DEFAULT_USAGE };
+export async function getUsageStats(
+  storage: StorageBackend
+): Promise<UsageStats> {
+  const raw = await storage.getText(USAGE_KEY);
+  if (!raw) {
+    const fresh = defaultUsage();
+    await storage.putText(USAGE_KEY, JSON.stringify(fresh, null, 2));
+    return fresh;
   }
   try {
-    const raw = fs.readFileSync(USAGE_FILE, "utf8");
     const parsed = JSON.parse(raw) as Partial<UsageStats>;
     return {
       analysisCalls: parsed.analysisCalls ?? 0,
@@ -75,40 +82,44 @@ export function getUsageStats(): UsageStats {
       recentLogs: Array.isArray(parsed.recentLogs) ? parsed.recentLogs : [],
     };
   } catch {
-    return { ...DEFAULT_USAGE };
+    return defaultUsage();
   }
 }
 
-export function recordUsage(
+export async function recordUsage(
+  storage: StorageBackend,
   operation: UsageOperationType,
   model: string,
   status: "success" | "error",
   durationMs: number,
   note?: string
-) {
-  ensureDirs();
-  const stats = getUsageStats();
-  if (status === "success") {
-    if (operation === "analysis") stats.analysisCalls++;
-    else if (operation === "copy") stats.copyCalls++;
-    else if (operation === "image_gen") stats.imageGenCalls++;
-    else if (operation === "video_gen") stats.videoGenCalls++;
-    else if (operation === "tts") stats.ttsCalls++;
-  } else {
-    stats.errors++;
+): Promise<void> {
+  try {
+    const stats = await getUsageStats(storage);
+    if (status === "success") {
+      if (operation === "analysis") stats.analysisCalls++;
+      else if (operation === "copy") stats.copyCalls++;
+      else if (operation === "image_gen") stats.imageGenCalls++;
+      else if (operation === "video_gen") stats.videoGenCalls++;
+      else if (operation === "tts") stats.ttsCalls++;
+    } else {
+      stats.errors++;
+    }
+    stats.lastUpdated = new Date().toISOString();
+    stats.recentLogs.unshift({
+      id: crypto.randomUUID().slice(0, 8),
+      operation,
+      model,
+      status,
+      durationMs: Math.round(durationMs),
+      note: note?.slice(0, 140),
+      timestamp: stats.lastUpdated,
+    });
+    stats.recentLogs = stats.recentLogs.slice(0, 30);
+    await storage.putText(USAGE_KEY, JSON.stringify(stats, null, 2));
+  } catch (err) {
+    console.warn("Usage telemetry write failed:", err);
   }
-  stats.lastUpdated = new Date().toISOString();
-  stats.recentLogs.unshift({
-    id: crypto.randomUUID().slice(0, 8),
-    operation,
-    model,
-    status,
-    durationMs: Math.round(durationMs),
-    note: note?.slice(0, 140),
-    timestamp: stats.lastUpdated,
-  });
-  stats.recentLogs = stats.recentLogs.slice(0, 30);
-  fs.writeFileSync(USAGE_FILE, JSON.stringify(stats, null, 2));
 }
 
 export interface GenerationJob {
@@ -127,21 +138,21 @@ export interface GenerationJob {
   updatedAt: string;
 }
 
-const jobMap = new Map<string, GenerationJob>();
-
-function persistJob(job: GenerationJob) {
-  ensureDirs();
-  fs.writeFileSync(
-    path.join(JOBS_DIR, `${job.id}.json`),
+async function persistJob(
+  storage: StorageBackend,
+  job: GenerationJob
+): Promise<void> {
+  await storage.putText(
+    `jobs/${job.id}.json`,
     JSON.stringify(job, null, 2)
   );
 }
 
-export function createJob(
+export async function createJob(
+  storage: StorageBackend,
   job: Omit<GenerationJob, "id" | "createdAt" | "updatedAt">
-): GenerationJob {
-  ensureDirs();
-  const id = `job_${crypto.randomBytes(6).toString("hex")}`;
+): Promise<GenerationJob> {
+  const id = `job_${randomHex(6)}`;
   const now = new Date().toISOString();
   const full: GenerationJob = {
     ...job,
@@ -149,71 +160,79 @@ export function createJob(
     createdAt: now,
     updatedAt: now,
   };
-  jobMap.set(id, full);
-  persistJob(full);
+  await persistJob(storage, full);
   return full;
 }
 
-export function getJob(id: string): GenerationJob | null {
+export async function getJob(
+  storage: StorageBackend,
+  id: string
+): Promise<GenerationJob | null> {
   const safe = sanitizeId(id);
   if (!safe) return null;
-  const cached = jobMap.get(safe);
-  if (cached) return cached;
-
-  ensureDirs();
-  const jobPath = path.join(JOBS_DIR, `${safe}.json`);
-  if (!fs.existsSync(jobPath)) return null;
+  const raw = await storage.getText(`jobs/${safe}.json`);
+  if (!raw) return null;
   try {
-    const stored = JSON.parse(fs.readFileSync(jobPath, "utf8")) as GenerationJob;
+    const stored = JSON.parse(raw) as GenerationJob;
     if (stored.id !== safe) return null;
-    jobMap.set(safe, stored);
     return stored;
   } catch {
     return null;
   }
 }
 
-export function updateJob(
+export async function updateJob(
+  storage: StorageBackend,
   id: string,
   patch: Partial<Omit<GenerationJob, "id" | "createdAt">>
-): GenerationJob | null {
+): Promise<GenerationJob | null> {
   const safe = sanitizeId(id);
   if (!safe) return null;
-  const existing = getJob(safe);
+  const existing = await getJob(storage, safe);
   if (!existing) return null;
   const updated: GenerationJob = {
     ...existing,
     ...patch,
     updatedAt: new Date().toISOString(),
   };
-  jobMap.set(safe, updated);
-  persistJob(updated);
+  await persistJob(storage, updated);
   return updated;
 }
 
-export function saveJobVideoBuffer(jobId: string, buffer: Buffer): string {
-  ensureDirs();
+export async function saveJobVideoBytes(
+  storage: StorageBackend,
+  jobId: string,
+  bytes: Uint8Array
+): Promise<string> {
   const safe = sanitizeId(jobId);
   if (!safe) throw new Error("Invalid job ID.");
   const filename = `${safe}.mp4`;
-  const target = path.join(JOBS_DIR, filename);
-  fs.writeFileSync(target, buffer);
+  await storage.putBinary(`jobs/${filename}`, bytes, "video/mp4");
   return filename;
 }
 
-export function getJobVideoPath(filename: string): string | null {
-  ensureDirs();
+export async function getJobVideoObject(
+  storage: StorageBackend,
+  filename: string,
+  range?: ByteRangeRequest
+): Promise<StoredBinaryObject | null> {
   const safe = sanitizeFilename(filename);
   if (!safe || !safe.endsWith(".mp4")) return null;
-  const full = path.join(JOBS_DIR, safe);
-  if (!fs.existsSync(full)) return null;
-  return full;
+  return await storage.getBinary(`jobs/${safe}`, range);
 }
+
+export const ASSET_KINDS = [
+  "source",
+  "cutout",
+  "concept",
+  "video",
+  "audio",
+] as const;
 
 export interface SavedAssetRef {
   id: string;
   label: string;
-  kind: "source" | "cutout" | "concept" | "video" | "audio";
+  kind: (typeof ASSET_KINDS)[number];
   filename: string;
   mimeType: string;
   url: string;
@@ -257,37 +276,35 @@ export interface SaveProjectAssetInput {
   engine?: string;
 }
 
-function extensionForMime(mimeType: string): string {
-  if (mimeType.includes("png")) return "png";
-  if (mimeType.includes("webp")) return "webp";
-  if (mimeType.includes("mp4")) return "mp4";
-  if (mimeType.includes("webm")) return "webm";
-  if (mimeType.includes("wav")) return "wav";
+export function extensionForMime(mimeType: string): string {
+  const lower = mimeType.toLowerCase();
+  if (lower.includes("png")) return "png";
+  if (lower.includes("webp")) return "webp";
+  if (lower.includes("mp4")) return "mp4";
+  if (lower.includes("webm")) return "webm";
+  if (lower.includes("wav")) return "wav";
+  if (lower.includes("mpeg") || lower.includes("mp3")) return "mp3";
+  if (lower.includes("ogg")) return "ogg";
   return "jpg";
 }
 
-function decodeDataUrlOrBase64(raw: string): Buffer {
+function decodeDataUrlOrBase64(raw: string): Uint8Array {
   const commaIdx = raw.indexOf(",");
-  const b64 = raw.startsWith("data:") && commaIdx !== -1 ? raw.slice(commaIdx + 1) : raw;
+  const b64 =
+    raw.startsWith("data:") && commaIdx !== -1 ? raw.slice(commaIdx + 1) : raw;
   return Buffer.from(b64, "base64");
 }
 
-export function listProjects(): Array<
-  Pick<
-    StoredProject,
-    | "id"
-    | "name"
-    | "campaignType"
-    | "clientOrBrandName"
-    | "visualStyle"
-    | "aspectRatio"
-    | "createdAt"
-    | "updatedAt"
-  > & { thumbnailUrl?: string; assetCount: number; videoCount: number }
-> {
-  ensureDirs();
-  const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
-  const list: Array<
+function buildAssetFilename(assetId: string, idx: number, mimeType: string): string {
+  const ext = extensionForMime(mimeType || "image/png");
+  const baseSlug =
+    (assetId || `asset_${idx}`).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) ||
+    `asset_${idx}`;
+  return `${baseSlug}.${ext}`;
+}
+
+export async function listProjects(storage: StorageBackend): Promise<
+  Array<
     Pick<
       StoredProject,
       | "id"
@@ -299,119 +316,264 @@ export function listProjects(): Array<
       | "createdAt"
       | "updatedAt"
     > & { thumbnailUrl?: string; assetCount: number; videoCount: number }
-  > = [];
+  >
+> {
+  const keys = await storage.listKeys("projects/");
+  const projectJsonKeys = keys.filter((k) =>
+    /^projects\/[a-zA-Z0-9_-]{4,64}\/project\.json$/.test(k)
+  );
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const jsonPath = path.join(PROJECTS_DIR, entry.name, "project.json");
-    if (!fs.existsSync(jsonPath)) continue;
-    try {
-      const p = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as StoredProject;
-      const thumb =
-        p.assets.find((a) => a.kind === "concept") ||
-        p.assets.find((a) => a.kind === "source") ||
-        p.assets.find((a) => a.kind === "cutout");
-      list.push({
-        id: p.id,
-        name: p.name,
-        campaignType: p.campaignType,
-        clientOrBrandName: p.clientOrBrandName,
-        visualStyle: p.visualStyle,
-        aspectRatio: p.aspectRatio,
-        createdAt: p.createdAt,
-        updatedAt: p.updatedAt,
-        thumbnailUrl: thumb?.url,
-        assetCount: p.assets.filter((a) => a.kind === "concept" || a.kind === "cutout").length,
-        videoCount: p.assets.filter((a) => a.kind === "video").length,
-      });
-    } catch {
-      // skip corrupt folder
-    }
-  }
+  const loaded = await Promise.all(
+    projectJsonKeys.map(async (key) => {
+      try {
+        const raw = await storage.getText(key);
+        if (!raw) return null;
+        const p = JSON.parse(raw) as StoredProject;
+        const assets = Array.isArray(p.assets) ? p.assets : [];
+        const thumb =
+          assets.find((a) => a.kind === "concept") ||
+          assets.find((a) => a.kind === "source") ||
+          assets.find((a) => a.kind === "cutout");
+        return {
+          id: p.id,
+          name: p.name,
+          campaignType: p.campaignType,
+          clientOrBrandName: p.clientOrBrandName,
+          visualStyle: p.visualStyle,
+          aspectRatio: p.aspectRatio,
+          createdAt: p.createdAt,
+          updatedAt: p.updatedAt,
+          thumbnailUrl: thumb?.url,
+          assetCount: assets.filter(
+            (a) => a.kind === "concept" || a.kind === "cutout"
+          ).length,
+          videoCount: assets.filter((a) => a.kind === "video").length,
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
 
+  const list = loaded.filter((item): item is NonNullable<typeof item> => item !== null);
   list.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
   return list;
 }
 
-export function getProject(id: string): StoredProject | null {
-  ensureDirs();
+export async function getProject(
+  storage: StorageBackend,
+  id: string
+): Promise<StoredProject | null> {
   const safe = sanitizeId(id);
   if (!safe) return null;
-  const jsonPath = path.join(PROJECTS_DIR, safe, "project.json");
-  if (!fs.existsSync(jsonPath)) return null;
+  const raw = await storage.getText(`projects/${safe}/project.json`);
+  if (!raw) return null;
   try {
-    return JSON.parse(fs.readFileSync(jsonPath, "utf8")) as StoredProject;
+    return JSON.parse(raw) as StoredProject;
   } catch {
     return null;
   }
 }
 
-export function saveProject(input: {
-  id?: string;
-  name: string;
-  campaignType: StoredProject["campaignType"];
-  clientOrBrandName: string;
-  language: StoredProject["language"];
-  targetTone: string;
-  visualStyle: string;
-  aspectRatio: string;
-  generationMode: StoredProject["generationMode"];
-  motionPreset: string;
-  motionPrompt: string;
-  notes: string;
-  analysis: unknown;
-  assetsToSave?: SaveProjectAssetInput[];
-  keepAssetFilenames?: string[];
-}): StoredProject {
-  ensureDirs();
-  const safeExisting = input.id ? sanitizeId(input.id) : null;
-  const id = safeExisting || `proj_${crypto.randomBytes(6).toString("hex")}`;
-  const projDir = path.join(PROJECTS_DIR, id);
-  const assetsDir = path.join(projDir, "assets");
-  fs.mkdirSync(assetsDir, { recursive: true });
+/**
+ * Streams a single raw binary asset (or copies an existing server-generated
+ * video job file) directly into `projects/{projectId}/assets/{filename}`.
+ * Avoids multi-megabyte JSON/base64 decoding so saving large images and videos
+ * stays well inside Cloudflare Workers Free's 10ms CPU limit.
+ */
+export async function uploadProjectAsset(
+  storage: StorageBackend,
+  params: {
+    projectId: string;
+    assetId: string;
+    label: string;
+    kind: SavedAssetRef["kind"];
+    mimeType: string;
+    body?: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | null;
+    knownLength?: number;
+    jobVideoFilename?: string;
+    style?: string;
+    mode?: string;
+    direction?: string;
+    aspectRatio?: string;
+    engine?: string;
+  }
+): Promise<SavedAssetRef> {
+  const safeProjectId = sanitizeId(params.projectId);
+  if (!safeProjectId) {
+    throw new Error("Invalid project ID.");
+  }
 
-  const existing = getProject(id);
+  const baseMime =
+    (params.mimeType || "image/png").split(";")[0].trim().toLowerCase() ||
+    "image/png";
+  const normalizedMime =
+    baseMime === "image/jpg"
+      ? "image/jpeg"
+      : ALLOWED_ASSET_MIMES.has(baseMime)
+        ? baseMime
+        : "application/octet-stream";
+
+  if (normalizedMime === "application/octet-stream") {
+    throw new Error("Unsupported asset MIME type.");
+  }
+
+  const filename = buildAssetFilename(params.assetId, 0, normalizedMime);
+  const targetKey = `projects/${safeProjectId}/assets/${filename}`;
+
+  if (params.jobVideoFilename) {
+    const safeJobFile = sanitizeFilename(params.jobVideoFilename);
+    if (!safeJobFile || !safeJobFile.endsWith(".mp4")) {
+      throw new Error("Invalid job video filename.");
+    }
+    const copied = await storage.copy(
+      `jobs/${safeJobFile}`,
+      targetKey,
+      "video/mp4"
+    );
+    if (!copied) {
+      throw new Error("Referenced video file was not found in storage.");
+    }
+  } else if (params.body) {
+    if (params.knownLength === 0) {
+      throw new Error("Asset payload is empty.");
+    }
+    if (
+      typeof params.knownLength === "number" &&
+      params.knownLength > MAX_ASSET_BYTES
+    ) {
+      throw new Error("Asset exceeds maximum allowed size (65 MB).");
+    }
+    await storage.putBinary(
+      targetKey,
+      params.body,
+      normalizedMime,
+      params.knownLength
+    );
+  } else {
+    throw new Error("Missing binary asset body.");
+  }
+
+  return {
+    id: params.assetId.slice(0, 64) || "asset",
+    label: params.label.slice(0, 120) || filename,
+    kind: ASSET_KINDS.includes(params.kind) ? params.kind : "concept",
+    filename,
+    mimeType: normalizedMime,
+    url: `/api/projects/${safeProjectId}/assets/${filename}`,
+    ...(params.style ? { style: params.style.slice(0, 40) } : {}),
+    ...(params.mode ? { mode: params.mode.slice(0, 40) } : {}),
+    ...(params.direction ? { direction: params.direction.slice(0, 240) } : {}),
+    ...(params.aspectRatio ? { aspectRatio: params.aspectRatio.slice(0, 16) } : {}),
+    ...(params.engine ? { engine: params.engine.slice(0, 40) } : {}),
+  };
+}
+
+export async function saveProject(
+  storage: StorageBackend,
+  input: {
+    id?: string;
+    name: string;
+    campaignType: StoredProject["campaignType"];
+    clientOrBrandName: string;
+    language: StoredProject["language"];
+    targetTone: string;
+    visualStyle: string;
+    aspectRatio: string;
+    generationMode: StoredProject["generationMode"];
+    motionPreset: string;
+    motionPrompt: string;
+    notes: string;
+    analysis: unknown;
+    uploadedAssets?: SavedAssetRef[];
+    assetsToSave?: SaveProjectAssetInput[];
+    keepAssetFilenames?: string[];
+  }
+): Promise<StoredProject> {
+  const safeExisting = input.id ? sanitizeId(input.id) : null;
+  const id = safeExisting || `proj_${randomHex(6)}`;
+
+  const existing = await getProject(storage, id);
   const now = new Date().toISOString();
 
   const savedAssets: SavedAssetRef[] = [];
+  const upsertAsset = (ref: SavedAssetRef) => {
+    const idx = savedAssets.findIndex((a) => a.filename === ref.filename);
+    if (idx >= 0) {
+      savedAssets[idx] = ref;
+    } else {
+      savedAssets.push(ref);
+    }
+  };
 
   if (existing && Array.isArray(input.keepAssetFilenames)) {
     const keepSet = new Set(input.keepAssetFilenames);
     for (const old of existing.assets) {
       if (keepSet.has(old.filename)) {
-        savedAssets.push(old);
+        upsertAsset(old);
       }
     }
   }
 
+  // Register pre-streamed binary assets uploaded via PUT /api/projects/:id/assets/:assetId
+  if (Array.isArray(input.uploadedAssets)) {
+    for (const item of input.uploadedAssets) {
+      const safeFile = sanitizeFilename(item?.filename);
+      if (!safeFile) continue;
+      const kind = ASSET_KINDS.includes(item.kind) ? item.kind : "concept";
+      upsertAsset({
+        id: String(item.id || safeFile).slice(0, 64),
+        label: String(item.label || safeFile).slice(0, 120),
+        kind,
+        filename: safeFile,
+        mimeType: String(item.mimeType || "image/png").slice(0, 80),
+        url: `/api/projects/${id}/assets/${safeFile}`,
+        ...(typeof item.style === "string" ? { style: item.style.slice(0, 40) } : {}),
+        ...(typeof item.mode === "string" ? { mode: item.mode.slice(0, 40) } : {}),
+        ...(typeof item.direction === "string"
+          ? { direction: item.direction.slice(0, 240) }
+          : {}),
+        ...(typeof item.aspectRatio === "string"
+          ? { aspectRatio: item.aspectRatio.slice(0, 16) }
+          : {}),
+        ...(typeof item.engine === "string" ? { engine: item.engine.slice(0, 40) } : {}),
+      });
+    }
+  }
+
+  // Backward-compatible support for inline base64 or job-video references
   if (Array.isArray(input.assetsToSave)) {
     for (let idx = 0; idx < input.assetsToSave.length; idx++) {
       const item = input.assetsToSave[idx];
-      const ext = extensionForMime(item.mimeType || "image/png");
-      const baseSlug = (item.id || `asset_${idx}`).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
-      const filename = `${baseSlug}.${ext}`;
-      const targetPath = path.join(assetsDir, filename);
+      const baseMime =
+        (item.mimeType || "image/png").split(";")[0].trim().toLowerCase() ||
+        "image/png";
+      const filename = buildAssetFilename(item.id, idx, baseMime);
+      const targetKey = `projects/${id}/assets/${filename}`;
 
       if (item.jobVideoFilename) {
-        const jobVideo = getJobVideoPath(item.jobVideoFilename);
-        if (jobVideo) {
-          fs.copyFileSync(jobVideo, targetPath);
-        } else {
+        const safeJobFile = sanitizeFilename(item.jobVideoFilename);
+        if (!safeJobFile || !safeJobFile.endsWith(".mp4")) continue;
+        const copied = await storage.copy(
+          `jobs/${safeJobFile}`,
+          targetKey,
+          "video/mp4"
+        );
+        if (!copied) continue;
+      } else if (item.dataUrlOrBase64) {
+        const bytes = decodeDataUrlOrBase64(item.dataUrlOrBase64);
+        if (bytes.byteLength === 0 || bytes.byteLength > MAX_ASSET_BYTES) {
           continue;
         }
-      } else if (item.dataUrlOrBase64) {
-        const buf = decodeDataUrlOrBase64(item.dataUrlOrBase64);
-        if (buf.length === 0 || buf.length > 65 * 1024 * 1024) continue;
-        fs.writeFileSync(targetPath, buf);
+        await storage.putBinary(targetKey, bytes, baseMime);
       } else {
         continue;
       }
 
-      const dedupeIdx = savedAssets.findIndex((a) => a.filename === filename);
-      const ref: SavedAssetRef = {
+      upsertAsset({
         id: item.id,
         label: item.label,
-        kind: item.kind,
+        kind: ASSET_KINDS.includes(item.kind) ? item.kind : "concept",
         filename,
         mimeType: item.mimeType,
         url: `/api/projects/${id}/assets/${filename}`,
@@ -420,12 +582,7 @@ export function saveProject(input: {
         direction: item.direction,
         aspectRatio: item.aspectRatio,
         engine: item.engine,
-      };
-      if (dedupeIdx >= 0) {
-        savedAssets[dedupeIdx] = ref;
-      } else {
-        savedAssets.push(ref);
-      }
+      });
     }
   }
 
@@ -448,11 +605,15 @@ export function saveProject(input: {
     updatedAt: now,
   };
 
-  fs.writeFileSync(path.join(projDir, "project.json"), JSON.stringify(project, null, 2));
+  await storage.putText(
+    `projects/${id}/project.json`,
+    JSON.stringify(project, null, 2)
+  );
   return project;
 }
 
-export function renameOrPatchProject(
+export async function renameOrPatchProject(
+  storage: StorageBackend,
   id: string,
   patch: Partial<
     Pick<
@@ -468,8 +629,8 @@ export function renameOrPatchProject(
       | "aspectRatio"
     >
   >
-): StoredProject | null {
-  const existing = getProject(id);
+): Promise<StoredProject | null> {
+  const existing = await getProject(storage, id);
   if (!existing) return null;
   const updated: StoredProject = {
     ...existing,
@@ -493,32 +654,35 @@ export function renameOrPatchProject(
     aspectRatio: patch.aspectRatio || existing.aspectRatio,
     updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(
-    path.join(PROJECTS_DIR, existing.id, "project.json"),
+  await storage.putText(
+    `projects/${existing.id}/project.json`,
     JSON.stringify(updated, null, 2)
   );
   return updated;
 }
 
-export function deleteProject(id: string): boolean {
-  ensureDirs();
+export async function deleteProject(
+  storage: StorageBackend,
+  id: string
+): Promise<boolean> {
   const safe = sanitizeId(id);
   if (!safe) return false;
-  const projDir = path.join(PROJECTS_DIR, safe);
-  if (!fs.existsSync(projDir)) return false;
-  fs.rmSync(projDir, { recursive: true, force: true });
-  return true;
+  return await storage.deletePrefix(`projects/${safe}/`);
 }
 
-export function getProjectAssetPath(
+export async function getProjectAssetObject(
+  storage: StorageBackend,
   projectId: string,
-  filename: string
-): string | null {
-  ensureDirs();
+  filename: string,
+  range?: ByteRangeRequest
+): Promise<{ object: StoredBinaryObject; safeFilename: string } | null> {
   const safeId = sanitizeId(projectId);
   const safeFile = sanitizeFilename(filename);
   if (!safeId || !safeFile) return null;
-  const target = path.join(PROJECTS_DIR, safeId, "assets", safeFile);
-  if (!fs.existsSync(target)) return null;
-  return target;
+  const object = await storage.getBinary(
+    `projects/${safeId}/assets/${safeFile}`,
+    range
+  );
+  if (!object) return null;
+  return { object, safeFilename: safeFile };
 }

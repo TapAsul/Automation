@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import type { StorageBackend } from "./storageAdapter.js";
 
 export interface ModelConfiguration {
   analysisModel: string;
@@ -11,58 +10,87 @@ export interface ModelConfiguration {
   updatedAt: string;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), ".studio-data");
-const CONFIG_FILE = path.join(DATA_DIR, "model-config.json");
-
-const DEFAULT_CONFIG: ModelConfiguration = {
-  analysisModel: process.env.GEMINI_ANALYSIS_MODEL || "gemini-4-hydrogen",
-  analysisFallbackModel:
-    process.env.GEMINI_ANALYSIS_FALLBACK_MODEL || "gemini-3.1-flash-lite",
-  imageGenModel:
-    process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-lite-image",
-  videoGenModel: process.env.GEMINI_VIDEO_MODEL || "gemini-omni-1.2-flash",
-  ttsModel: process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
-  ttsFallbackModel:
-    process.env.GEMINI_TTS_FALLBACK_MODEL || "gemini-3.8-flash-tts",
-  updatedAt: new Date().toISOString(),
-};
-
-function ensureDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+export interface ModelEnvOverrides {
+  GEMINI_ANALYSIS_MODEL?: string;
+  GEMINI_ANALYSIS_FALLBACK_MODEL?: string;
+  GEMINI_IMAGE_MODEL?: string;
+  GEMINI_VIDEO_MODEL?: string;
+  GEMINI_TTS_MODEL?: string;
+  GEMINI_TTS_FALLBACK_MODEL?: string;
 }
 
-export function getModelConfig(): ModelConfiguration {
-  ensureDir();
-  if (!fs.existsSync(CONFIG_FILE)) {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
-    return { ...DEFAULT_CONFIG };
-  }
-  try {
-    const raw = fs.readFileSync(CONFIG_FILE, "utf8");
-    const parsed = JSON.parse(raw) as Partial<ModelConfiguration>;
-    return {
-      analysisModel: parsed.analysisModel || DEFAULT_CONFIG.analysisModel,
-      analysisFallbackModel:
-        parsed.analysisFallbackModel || DEFAULT_CONFIG.analysisFallbackModel,
-      imageGenModel: parsed.imageGenModel || DEFAULT_CONFIG.imageGenModel,
-      videoGenModel: parsed.videoGenModel || DEFAULT_CONFIG.videoGenModel,
-      ttsModel: parsed.ttsModel || DEFAULT_CONFIG.ttsModel,
-      ttsFallbackModel:
-        parsed.ttsFallbackModel || DEFAULT_CONFIG.ttsFallbackModel,
-      updatedAt: parsed.updatedAt || DEFAULT_CONFIG.updatedAt,
-    };
-  } catch {
-    return { ...DEFAULT_CONFIG };
-  }
-}
+const CONFIG_KEY = "model-config.json";
+const CACHE_TTL_MS = 15_000;
 
-export function updateModelConfig(
-  patch: Partial<Omit<ModelConfiguration, "updatedAt">>
+const configCache = new WeakMap<
+  StorageBackend,
+  { value: ModelConfiguration; expiresAt: number }
+>();
+
+export function buildDefaultModelConfig(
+  env?: ModelEnvOverrides
 ): ModelConfiguration {
-  ensureDir();
-  const current = getModelConfig();
+  return {
+    analysisModel: env?.GEMINI_ANALYSIS_MODEL || "gemini-4-hydrogen",
+    analysisFallbackModel:
+      env?.GEMINI_ANALYSIS_FALLBACK_MODEL || "gemini-3.1-flash-lite",
+    imageGenModel: env?.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-lite-image",
+    videoGenModel: env?.GEMINI_VIDEO_MODEL || "gemini-omni-1.2-flash",
+    ttsModel: env?.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
+    ttsFallbackModel:
+      env?.GEMINI_TTS_FALLBACK_MODEL || "gemini-3.8-flash-tts",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function getModelConfig(
+  storage: StorageBackend,
+  env?: ModelEnvOverrides
+): Promise<ModelConfiguration> {
+  const cached = configCache.get(storage);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { ...cached.value };
+  }
+
+  const defaults = buildDefaultModelConfig(env);
+  const raw = await storage.getText(CONFIG_KEY);
+  if (!raw) {
+    await storage.putText(CONFIG_KEY, JSON.stringify(defaults, null, 2));
+    configCache.set(storage, {
+      value: defaults,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+    return { ...defaults };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ModelConfiguration>;
+    const resolved: ModelConfiguration = {
+      analysisModel: parsed.analysisModel || defaults.analysisModel,
+      analysisFallbackModel:
+        parsed.analysisFallbackModel || defaults.analysisFallbackModel,
+      imageGenModel: parsed.imageGenModel || defaults.imageGenModel,
+      videoGenModel: parsed.videoGenModel || defaults.videoGenModel,
+      ttsModel: parsed.ttsModel || defaults.ttsModel,
+      ttsFallbackModel: parsed.ttsFallbackModel || defaults.ttsFallbackModel,
+      updatedAt: parsed.updatedAt || defaults.updatedAt,
+    };
+    configCache.set(storage, {
+      value: resolved,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+    return { ...resolved };
+  } catch {
+    return { ...defaults };
+  }
+}
+
+export async function updateModelConfig(
+  storage: StorageBackend,
+  patch: Partial<Omit<ModelConfiguration, "updatedAt">>,
+  env?: ModelEnvOverrides
+): Promise<ModelConfiguration> {
+  const current = await getModelConfig(storage, env);
   const cleanId = (val: unknown, fallback: string): string => {
     if (typeof val !== "string") return fallback;
     const trimmed = val.trim();
@@ -81,6 +109,10 @@ export function updateModelConfig(
     ttsFallbackModel: cleanId(patch.ttsFallbackModel, current.ttsFallbackModel),
     updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2));
-  return next;
+  await storage.putText(CONFIG_KEY, JSON.stringify(next, null, 2));
+  configCache.set(storage, {
+    value: next,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+  return { ...next };
 }

@@ -1,10 +1,12 @@
-import { ThinkingLevel, type GoogleGenAI } from "@google/genai";
-import { getModelConfig } from "./modelConfig.js";
+import { Buffer } from "node:buffer";
+import { ThinkingLevel, type GoogleGenAI } from "@google/genai/web";
+import { getModelConfig, type ModelEnvOverrides } from "./modelConfig.js";
+import type { StorageBackend } from "./storageAdapter.js";
 import {
   createJob,
   getJob,
   recordUsage,
-  saveJobVideoBuffer,
+  saveJobVideoBytes,
   updateJob,
   type GenerationJob,
 } from "./studioStore.js";
@@ -35,6 +37,7 @@ const MOTION_PRESET_GUIDANCE: Record<MotionPreset, string> = {
 };
 
 export async function generateMotionPrompt(
+  storage: StorageBackend,
   ai: GoogleGenAI,
   params: {
     productName: string;
@@ -42,9 +45,10 @@ export async function generateMotionPrompt(
     motionPreset: string;
     visualStyle?: string;
     customNotes?: string;
-  }
+  },
+  envOverrides?: ModelEnvOverrides
 ): Promise<{ motionPrompt: string; modelUsed: string }> {
-  const config = getModelConfig();
+  const config = await getModelConfig(storage, envOverrides);
   const start = Date.now();
   const normalizedPreset = normalizeMotionPreset(params.motionPreset);
   const presetGuide =
@@ -71,12 +75,21 @@ Write a single concise, production-ready 45–65 word image-to-video commercial 
           ...(model.includes("hydrogen")
             ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
             : {}),
-          abortSignal: AbortSignal.timeout(model === config.analysisModel ? 10000 : 20000),
+          abortSignal: AbortSignal.timeout(
+            model === config.analysisModel ? 10000 : 20000
+          ),
         },
       });
       const text = (response.text ?? "").trim();
       if (!text) throw new Error("Empty motion prompt returned.");
-      recordUsage("copy", model, "success", Date.now() - start, normalizedPreset);
+      await recordUsage(
+        storage,
+        "copy",
+        model,
+        "success",
+        Date.now() - start,
+        normalizedPreset
+      );
       return { motionPrompt: text, modelUsed: model };
     } catch (err) {
       primaryErr = err;
@@ -84,11 +97,22 @@ Write a single concise, production-ready 45–65 word image-to-video commercial 
   }
 
   const msg = formatGeminiError(primaryErr, config.analysisModel);
-  recordUsage("copy", config.analysisModel, "error", Date.now() - start, msg);
+  await recordUsage(
+    storage,
+    "copy",
+    config.analysisModel,
+    "error",
+    Date.now() - start,
+    msg
+  );
   throw new Error(msg);
 }
 
-export async function verifyVideoModelAccess(aiBeta: GoogleGenAI): Promise<{
+export async function verifyVideoModelAccess(
+  storage: StorageBackend,
+  aiBeta: GoogleGenAI,
+  envOverrides?: ModelEnvOverrides
+): Promise<{
   available: boolean;
   status: "available" | "quota_limited" | "unavailable";
   model: string;
@@ -96,7 +120,7 @@ export async function verifyVideoModelAccess(aiBeta: GoogleGenAI): Promise<{
   endpoint: string;
   note: string;
 }> {
-  const config = getModelConfig();
+  const config = await getModelConfig(storage, envOverrides);
   const model = config.videoGenModel;
   const endpoint = "/v1beta/interactions";
 
@@ -141,6 +165,7 @@ export async function verifyVideoModelAccess(aiBeta: GoogleGenAI): Promise<{
 }
 
 export async function startVideoGenerationJob(
+  storage: StorageBackend,
   ai: GoogleGenAI,
   params: {
     imageBase64: string;
@@ -149,14 +174,18 @@ export async function startVideoGenerationJob(
     aspectRatio: AspectRatioOption;
     durationSec: number;
     resolution?: "720p" | "1080p";
-  }
+  },
+  envOverrides?: ModelEnvOverrides
 ): Promise<GenerationJob> {
-  const config = getModelConfig();
+  const config = await getModelConfig(storage, envOverrides);
   const model = config.videoGenModel;
-  const clampedDuration = Math.min(15, Math.max(3, Math.round(params.durationSec)));
+  const clampedDuration = Math.min(
+    15,
+    Math.max(3, Math.round(params.durationSec))
+  );
   const resolution = params.resolution || "1080p";
 
-  const job = createJob({
+  const job = await createJob(storage, {
     type: "video",
     status: "queued",
     model,
@@ -193,26 +222,38 @@ export async function startVideoGenerationJob(
     const immediateStatus =
       interaction.status === "completed" ? "completed" : "processing";
 
-    const updated = updateJob(job.id, {
+    const updated = await updateJob(storage, job.id, {
       status: immediateStatus,
       interactionId: interaction.id,
     });
 
     if (interaction.status === "completed") {
-      return await finalizeCompletedInteraction(ai, updated || job, interaction, start);
+      return await finalizeCompletedInteraction(
+        storage,
+        updated || job,
+        interaction,
+        start
+      );
     }
 
     return updated || job;
   } catch (err: unknown) {
     const cleanMsg = formatGeminiError(err, model);
-    recordUsage("video_gen", model, "error", Date.now() - start, cleanMsg);
-    updateJob(job.id, { status: "failed", error: cleanMsg });
+    await recordUsage(
+      storage,
+      "video_gen",
+      model,
+      "error",
+      Date.now() - start,
+      cleanMsg
+    );
+    await updateJob(storage, job.id, { status: "failed", error: cleanMsg });
     throw new Error(cleanMsg);
   }
 }
 
 async function finalizeCompletedInteraction(
-  _ai: GoogleGenAI,
+  storage: StorageBackend,
   job: GenerationJob,
   interaction: {
     id: string;
@@ -246,10 +287,18 @@ async function finalizeCompletedInteraction(
     }
   }
   if (!base64Video) {
-    const msg = "Video interaction completed but returned no MP4 output payload.";
-    recordUsage("video_gen", job.model, "error", startMs ? Date.now() - startMs : 0, msg);
+    const msg =
+      "Video interaction completed but returned no MP4 output payload.";
+    await recordUsage(
+      storage,
+      "video_gen",
+      job.model,
+      "error",
+      startMs ? Date.now() - startMs : 0,
+      msg
+    );
     return (
-      updateJob(job.id, { status: "failed", error: msg }) || {
+      (await updateJob(storage, job.id, { status: "failed", error: msg })) || {
         ...job,
         status: "failed",
         error: msg,
@@ -257,10 +306,11 @@ async function finalizeCompletedInteraction(
     );
   }
 
-  const buffer = Buffer.from(base64Video, "base64");
-  const filename = saveJobVideoBuffer(job.id, buffer);
+  const bytes = Buffer.from(base64Video, "base64");
+  const filename = await saveJobVideoBytes(storage, job.id, bytes);
   const videoUrl = `/api/video-studio/file/${filename}`;
-  recordUsage(
+  await recordUsage(
+    storage,
     "video_gen",
     job.model,
     "success",
@@ -268,11 +318,11 @@ async function finalizeCompletedInteraction(
     `${job.aspectRatio} · ${job.durationSec}s · ${job.resolution}`
   );
   return (
-    updateJob(job.id, {
+    (await updateJob(storage, job.id, {
       status: "completed",
       videoFile: filename,
       videoUrl,
-    }) || {
+    })) || {
       ...job,
       status: "completed",
       videoFile: filename,
@@ -282,10 +332,11 @@ async function finalizeCompletedInteraction(
 }
 
 export async function pollVideoJobStatus(
+  storage: StorageBackend,
   ai: GoogleGenAI,
   jobId: string
 ): Promise<GenerationJob | null> {
-  const job = getJob(jobId);
+  const job = await getJob(storage, jobId);
   if (!job) return null;
   if (job.status === "completed" || job.status === "failed") {
     return job;
@@ -297,24 +348,28 @@ export async function pollVideoJobStatus(
   try {
     const interaction = await ai.interactions.get(job.interactionId);
     if (interaction.status === "completed") {
-      return await finalizeCompletedInteraction(ai, job, interaction as never);
+      return await finalizeCompletedInteraction(
+        storage,
+        job,
+        interaction as never
+      );
     }
     if (interaction.status === "failed" || interaction.status === "cancelled") {
       const errDetail =
         (interaction as { error?: { message?: string } }).error?.message ||
         `Video generation ${interaction.status}.`;
       const cleanErr = formatGeminiError(errDetail, job.model);
-      recordUsage("video_gen", job.model, "error", 0, cleanErr);
-      return updateJob(job.id, {
+      await recordUsage(storage, "video_gen", job.model, "error", 0, cleanErr);
+      return await updateJob(storage, job.id, {
         status: "failed",
         error: cleanErr,
       });
     }
-    return updateJob(job.id, { status: "processing" });
+    return await updateJob(storage, job.id, { status: "processing" });
   } catch (err: unknown) {
     const cleanErr = formatGeminiError(err, job.model);
-    recordUsage("video_gen", job.model, "error", 0, cleanErr);
-    return updateJob(job.id, {
+    await recordUsage(storage, "video_gen", job.model, "error", 0, cleanErr);
+    return await updateJob(storage, job.id, {
       status: "failed",
       error: cleanErr,
     });
@@ -322,6 +377,7 @@ export async function pollVideoJobStatus(
 }
 
 export async function extendVideoJob(
+  storage: StorageBackend,
   ai: GoogleGenAI,
   params: {
     previousInteractionId: string;
@@ -329,14 +385,15 @@ export async function extendVideoJob(
     aspectRatio: AspectRatioOption;
     extraSeconds: number;
     resolution?: "720p" | "1080p";
-  }
+  },
+  envOverrides?: ModelEnvOverrides
 ): Promise<GenerationJob> {
-  const config = getModelConfig();
+  const config = await getModelConfig(storage, envOverrides);
   const model = config.videoGenModel;
   const extra = Math.min(15, Math.max(5, Math.round(params.extraSeconds)));
   const resolution = params.resolution || "1080p";
 
-  const job = createJob({
+  const job = await createJob(storage, {
     type: "video",
     status: "queued",
     model,
@@ -363,19 +420,31 @@ export async function extendVideoJob(
       background: true,
     });
 
-    const updated = updateJob(job.id, {
+    const updated = await updateJob(storage, job.id, {
       status: interaction.status === "completed" ? "completed" : "processing",
       interactionId: interaction.id,
     });
 
     if (interaction.status === "completed") {
-      return await finalizeCompletedInteraction(ai, updated || job, interaction, start);
+      return await finalizeCompletedInteraction(
+        storage,
+        updated || job,
+        interaction,
+        start
+      );
     }
     return updated || job;
   } catch (err: unknown) {
     const cleanMsg = formatGeminiError(err, model);
-    recordUsage("video_gen", model, "error", Date.now() - start, cleanMsg);
-    updateJob(job.id, { status: "failed", error: cleanMsg });
+    await recordUsage(
+      storage,
+      "video_gen",
+      model,
+      "error",
+      Date.now() - start,
+      cleanMsg
+    );
+    await updateJob(storage, job.id, { status: "failed", error: cleanMsg });
     throw new Error(cleanMsg);
   }
 }

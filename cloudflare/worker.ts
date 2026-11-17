@@ -1,41 +1,70 @@
-import { Container, getContainer } from "@cloudflare/containers";
+import { handleApiRequest } from "../server/apiHandler.js";
+import {
+  createMemoryStorage,
+  type StorageBackend,
+} from "../server/storageAdapter.js";
+import { createR2Storage } from "./r2Storage.js";
 
-interface Env {
-  KLIPCART_CONTAINER: DurableObjectNamespace<KlipCartContainer>;
-  GEMINI_API_KEY: string;
-  R2_ACCOUNT_ID: string;
-  R2_BUCKET_NAME: string;
-  AWS_ACCESS_KEY_ID: string;
-  AWS_SECRET_ACCESS_KEY: string;
+export interface Env {
+  /** Built React SPA static files from `./dist` (Cloudflare Workers Static Assets). */
+  ASSETS: Fetcher;
+  /** Native R2 bucket binding (`klipcart-studio-data`) for saved projects, assets, jobs, usage, and model config. */
+  STUDIO_DATA?: R2Bucket;
+  /** Server-side Google Gemini API key configured with `wrangler secret put GEMINI_API_KEY`. */
+  GEMINI_API_KEY?: string;
+  /** Optional model identifier overrides. */
+  GEMINI_ANALYSIS_MODEL?: string;
+  GEMINI_ANALYSIS_FALLBACK_MODEL?: string;
+  GEMINI_IMAGE_MODEL?: string;
+  GEMINI_VIDEO_MODEL?: string;
+  GEMINI_TTS_MODEL?: string;
+  GEMINI_TTS_FALLBACK_MODEL?: string;
+}
+
+// Reuse storage wrapper instances across requests inside the same Worker isolate.
+const r2Cache = new WeakMap<R2Bucket, StorageBackend>();
+const fallbackMemoryStorage = createMemoryStorage();
+
+function resolveStorage(env: Env): StorageBackend {
+  if (!env.STUDIO_DATA) {
+    return fallbackMemoryStorage;
+  }
+  let cached = r2Cache.get(env.STUDIO_DATA);
+  if (!cached) {
+    cached = createR2Storage(env.STUDIO_DATA);
+    r2Cache.set(env.STUDIO_DATA, cached);
+  }
+  return cached;
 }
 
 /**
- * Runs the existing Express application in a Cloudflare Container. This keeps
- * the React UI and all /api routes on the same origin while preserving the
- * Node.js APIs used by the app.
+ * KlipCart — Cloudflare Workers Free entry point.
+ *
+ * Runs the entire KlipCart `/api/*` backend natively on Cloudflare Workers Free
+ * with direct R2 storage (`env.STUDIO_DATA`) and Workers Static Assets
+ * (`env.ASSETS`) on the same origin. Requires no Docker containers, no Durable
+ * Objects, no S3 access keys, and no Workers Paid subscription.
  */
-export class KlipCartContainer extends Container<Env> {
-  defaultPort = 3000;
-  sleepAfter = "10m";
-
-  constructor(ctx: any, env: Env) {
-    super(ctx, env);
-    this.envVars = {
-      NODE_ENV: "production",
-      PORT: "3000",
-      HOME: "/app",
-      GEMINI_API_KEY: env.GEMINI_API_KEY || "",
-      R2_ACCOUNT_ID: env.R2_ACCOUNT_ID || "",
-      R2_BUCKET_NAME: env.R2_BUCKET_NAME || "",
-      AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID || "",
-      AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY || "",
-    };
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const container = getContainer(env.KLIPCART_CONTAINER);
-    return container.fetch(request);
+    const apiResponse = await handleApiRequest(request, {
+      storage: resolveStorage(env),
+      geminiApiKey: env.GEMINI_API_KEY,
+      modelEnv: {
+        GEMINI_ANALYSIS_MODEL: env.GEMINI_ANALYSIS_MODEL,
+        GEMINI_ANALYSIS_FALLBACK_MODEL: env.GEMINI_ANALYSIS_FALLBACK_MODEL,
+        GEMINI_IMAGE_MODEL: env.GEMINI_IMAGE_MODEL,
+        GEMINI_VIDEO_MODEL: env.GEMINI_VIDEO_MODEL,
+        GEMINI_TTS_MODEL: env.GEMINI_TTS_MODEL,
+        GEMINI_TTS_FALLBACK_MODEL: env.GEMINI_TTS_FALLBACK_MODEL,
+      },
+      runtime: "cloudflare-workers",
+    });
+
+    if (apiResponse) {
+      return apiResponse;
+    }
+
+    return env.ASSETS.fetch(request);
   },
 };
