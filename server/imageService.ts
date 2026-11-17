@@ -1,5 +1,6 @@
-import type { GoogleGenAI } from "@google/genai";
-import { getModelConfig } from "./modelConfig.js";
+import type { GoogleGenAI } from "@google/genai/web";
+import { getModelConfig, type ModelEnvOverrides } from "./modelConfig.js";
+import type { StorageBackend } from "./storageAdapter.js";
 import { recordUsage } from "./studioStore.js";
 import {
   formatGeminiError,
@@ -124,6 +125,7 @@ function extractInlineImage(response: unknown): {
 }
 
 export async function generateAdConcepts(
+  storage: StorageBackend,
   ai: GoogleGenAI,
   params: {
     productName: string;
@@ -136,15 +138,17 @@ export async function generateAdConcepts(
     productImageBase64?: string;
     productImageMimeType?: string;
     conceptIndices: number[];
-  }
+  },
+  envOverrides?: ModelEnvOverrides
 ): Promise<{
   concepts: GeneratedConceptOutput[];
   modelUsed: string;
   apiWarning?: string;
 }> {
-  const config = getModelConfig();
+  const config = await getModelConfig(storage, envOverrides);
   const model = config.imageGenModel;
-  const directions = STYLE_DIRECTIONS[params.visualStyle] || STYLE_DIRECTIONS.Luxury;
+  const directions =
+    STYLE_DIRECTIONS[params.visualStyle] || STYLE_DIRECTIONS.Luxury;
   const fallbackBackdrops =
     FALLBACK_BACKDROPS_BY_STYLE[params.visualStyle] ||
     FALLBACK_BACKDROPS_BY_STYLE.Luxury;
@@ -198,7 +202,8 @@ export async function generateAdConcepts(
         throw new Error("Nano Banana returned no image data.");
       }
 
-      recordUsage(
+      await recordUsage(
+        storage,
         "image_gen",
         model,
         "success",
@@ -219,7 +224,14 @@ export async function generateAdConcepts(
       };
     } catch (err: unknown) {
       const cleanMsg = formatGeminiError(err, model);
-      recordUsage("image_gen", model, "error", Date.now() - start, cleanMsg);
+      await recordUsage(
+        storage,
+        "image_gen",
+        model,
+        "error",
+        Date.now() - start,
+        cleanMsg
+      );
       if (!sharedApiWarning) {
         sharedApiWarning = cleanMsg;
       }

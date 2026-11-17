@@ -1,16 +1,22 @@
 # KlipCart
 
-A React/Vite storefront-ad creative studio with a Node/Express API.
+A React/Vite product showcase generator and TikTok Shop creative studio backed by Google Gemini AI and persistent project storage.
 
 ## Run locally
 
-```sh
+```powershell
 npm install
 npm run dev
 ```
 
-Set `GEMINI_API_KEY` in a local `.env` file to enable Gemini-powered features. See `.env.example` for the variable name.
+Copy `.env.example` to `.env` and set your `GEMINI_API_KEY` to enable Gemini-powered features. Local projects and assets are saved in `.studio-data/`.
 
-## Deploy to Cloudflare
+## Deploy to Cloudflare (Free Plan)
 
-This app needs its Express backend, so do not use the dashboard's static drag-and-drop uploader. Follow [`CLOUDFLARE.md`](./CLOUDFLARE.md) to deploy it with Cloudflare Workers Containers and R2.
+KlipCart runs natively on **Cloudflare Workers Free** with Workers Static Assets and a direct Cloudflare R2 bucket binding (`klipcart-studio-data`) — no Docker or Cloudflare Containers required:
+
+```powershell
+npx.cmd wrangler deploy
+```
+
+Follow [`CLOUDFLARE.md`](./CLOUDFLARE.md) for complete step-by-step Windows PowerShell setup and deployment instructions.

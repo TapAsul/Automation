@@ -5,7 +5,20 @@ export const ALLOWED_IMAGE_MIMES = new Set([
   "image/webp",
 ]);
 
+export const ALLOWED_ASSET_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "video/mp4",
+  "video/webm",
+  "audio/wav",
+  "audio/mpeg",
+  "audio/ogg",
+]);
+
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024; // 12 MB per uploaded image
+export const MAX_ASSET_BYTES = 65 * 1024 * 1024; // 65 MB per saved campaign asset
 
 export const VISUAL_STYLES = [
   "Luxury",
@@ -115,6 +128,24 @@ export function sanitizeBase64Payload(raw: string): string {
   return raw.trim();
 }
 
+const BASE64_CHUNK_RE = /^[A-Za-z0-9+/=\s]+$/;
+
+function looksLikeValidBase64(clean: string): boolean {
+  if (!clean) return false;
+  // For small/medium strings validate completely; for multi-MB payloads
+  // validate head, middle, and tail windows to stay well within Cloudflare
+  // Workers Free's 10ms per-request CPU limit.
+  if (clean.length <= 65536) {
+    return BASE64_CHUNK_RE.test(clean);
+  }
+  const mid = Math.floor(clean.length / 2);
+  return (
+    BASE64_CHUNK_RE.test(clean.slice(0, 2048)) &&
+    BASE64_CHUNK_RE.test(clean.slice(mid, mid + 2048)) &&
+    BASE64_CHUNK_RE.test(clean.slice(-2048))
+  );
+}
+
 export function validateImageInput(
   imageBase64: unknown,
   mimeType: unknown,
@@ -130,9 +161,6 @@ export function validateImageInput(
     };
   }
   const clean = sanitizeBase64Payload(imageBase64);
-  if (!/^[A-Za-z0-9+/=\s]+$/.test(clean)) {
-    return { ok: false, error: `Invalid base64 encoding for ${fieldName}.` };
-  }
   const estimatedBytes = Math.floor((clean.length * 3) / 4);
   if (estimatedBytes > MAX_IMAGE_BYTES) {
     return {
@@ -140,10 +168,16 @@ export function validateImageInput(
       error: `${fieldName} exceeds maximum allowed size (${Math.round(MAX_IMAGE_BYTES / (1024 * 1024))} MB).`,
     };
   }
+  if (!looksLikeValidBase64(clean)) {
+    return { ok: false, error: `Invalid base64 encoding for ${fieldName}.` };
+  }
   return {
     ok: true,
     base64: clean,
-    mimeType: mimeType.toLowerCase() === "image/jpg" ? "image/jpeg" : mimeType.toLowerCase(),
+    mimeType:
+      mimeType.toLowerCase() === "image/jpg"
+        ? "image/jpeg"
+        : mimeType.toLowerCase(),
   };
 }
 

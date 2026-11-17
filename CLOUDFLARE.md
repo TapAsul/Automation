@@ -1,62 +1,110 @@
-# Deploy the full KlipCart app on Cloudflare
+# Deploy KlipCart on Cloudflare Workers Free
 
-The dashboard's **Upload and deploy** screen is for already-built static files. This project also has a Node/Express API, so uploading the source ZIP there cannot deploy the complete app.
+KlipCart deploys natively on **Cloudflare Workers Free** using:
 
-This setup uses **Cloudflare Workers + Containers** to run the existing Node server and serves the React UI and `/api` endpoints from the same app. It stores `.studio-data` on an R2 bucket, so saved projects and generated files survive container restarts.
+- **Cloudflare Workers Static Assets** — serves the built React/Vite UI from `./dist` for free on Cloudflare's global CDN (no cold starts).
+- **Cloudflare Worker (`cloudflare/worker.ts`)** — handles every `/api/*` endpoint on the same origin using Web Standard `fetch` and `@google/genai/web`.
+- **Cloudflare R2 (`klipcart-studio-data`)** — stores saved projects, uploaded/generated images and videos, usage telemetry, and model settings using a direct native Worker binding (`env.STUDIO_DATA`).
+
+**No Docker Desktop, no Cloudflare Containers, no Durable Objects, no Workers Paid subscription, and no `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets are required.**
 
 ## Requirements
 
-- A Cloudflare account with **Containers** enabled.
-- Node.js 22.12 or newer and npm.
-- Docker Desktop or Docker Engine running on the computer used to deploy. Wrangler builds the container image from `Dockerfile`.
-- An R2 bucket and an R2 S3 API token with read/write access to that bucket.
-- A Gemini API key for AI features.
+- A **Cloudflare Workers Free** account.
+- **R2** enabled on your Cloudflare account (R2 Free Tier includes 10 GB storage, 1M Class A writes, and 10M Class B reads per month at $0).
+- **Node.js 22.12+** (Node 24 works) and **npm**.
+- A **Google Gemini API key** (`GEMINI_API_KEY`) for AI analysis, copywriting, voiceover, and image/video studio features.
 
-## One-time setup
+## Windows PowerShell Deployment Steps
 
-1. Extract the project ZIP and open a terminal in the `KlipCart` folder.
-2. Install dependencies and sign in to Cloudflare:
+### 1. Open the project folder and install packages
 
-   ```sh
-   npm install
-   npx wrangler login
-   ```
-
-3. Create the app's private data bucket:
-
-   ```sh
-   npx wrangler r2 bucket create klipcart-studio-data
-   ```
-
-   If you already created this bucket, skip this command. In `wrangler.jsonc`, replace `REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID` with the account ID shown in your Cloudflare dashboard. The bucket name should match the one in that file.
-
-4. In Cloudflare, create an R2 API token with **Object Read & Write** access limited to `klipcart-studio-data`. Then add the credentials as Wrangler secrets:
-
-   ```sh
-   npx wrangler secret put AWS_ACCESS_KEY_ID
-   npx wrangler secret put AWS_SECRET_ACCESS_KEY
-   npx wrangler secret put GEMINI_API_KEY
-   ```
-
-   Wrangler prompts for each value. Keep these values private; do not paste them into source files or chat.
-
-## Deploy
-
-Make sure Docker is running, then from the project folder run:
-
-```sh
-npm run cloudflare:deploy
+```powershell
+cd C:\Users\PC\OneDrive\Documents\Automation\Automation
+npm install
 ```
 
-Wrangler builds the container and deploys the Worker. It prints the app URL when deployment finishes. The first visit may take a little longer while the container starts.
+### 2. Verify your Cloudflare login
 
-## Local development
+```powershell
+npx.cmd wrangler whoami
+```
 
-For the existing local Node app, copy `.env.example` to `.env`, add your `GEMINI_API_KEY`, then run:
+If you are not logged in yet, run:
 
-```sh
-npm install
+```powershell
+npx.cmd wrangler login
+```
+
+### 3. Ensure your R2 bucket exists
+
+If you already created `klipcart-studio-data`, check it with:
+
+```powershell
+npx.cmd wrangler r2 bucket list
+```
+
+If it does not appear in the list yet, create it once:
+
+```powershell
+npx.cmd wrangler r2 bucket create klipcart-studio-data
+```
+
+### 4. Set your Gemini API key secret
+
+```powershell
+npx.cmd wrangler secret put GEMINI_API_KEY
+```
+
+When prompted, paste your Gemini API key and press **Enter**. (If you already saved `GEMINI_API_KEY` on the `klipcart` Worker earlier, Cloudflare keeps it automatically — you only need to re-run this if you want to update it.)
+
+> Optional cleanup: If you previously added `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` for the old container setup, they are no longer needed and can be safely removed:
+>
+> ```powershell
+> npx.cmd wrangler secret delete AWS_ACCESS_KEY_ID
+> npx.cmd wrangler secret delete AWS_SECRET_ACCESS_KEY
+> ```
+
+### 5. Deploy KlipCart
+
+```powershell
+npx.cmd wrangler deploy
+```
+
+Wrangler automatically runs `npm run build`, uploads the React UI to Workers Static Assets, binds R2 (`klipcart-studio-data`), removes the old unused `KlipCartContainer` Durable Object class via migration `v2`, and prints your live URL:
+
+```text
+https://klipcart.<your-subdomain>.workers.dev
+```
+
+### 6. (Optional) Sync existing local `.studio-data` files to R2
+
+Any data already inside `klipcart-studio-data` works immediately because all R2 object keys (`model-config.json`, `usage.json`, `projects/<id>/project.json`, `projects/<id>/assets/*`, `jobs/*`) were preserved unchanged.
+
+If you also want to copy projects/settings from your local `.studio-data` folder into your live R2 bucket, run:
+
+```powershell
+npm run cloudflare:sync-r2
+```
+
+## Deploy Without R2 (Optional Zero-Card Mode)
+
+If R2 is not enabled on your Cloudflare account yet, remove or comment out the `"r2_buckets"` block in `wrangler.jsonc` and run `npx.cmd wrangler deploy`. The Worker automatically falls back to temporary in-memory storage so product analysis, background removal, studio compositing, local video rendering, copywriting, and voiceover still work on Cloudflare Free (saved projects simply reset when the Worker restarts until you re-enable `r2_buckets`).
+
+## Local Development
+
+### Option A: Local Node/Express + Vite (fast hot reload, saves to `.studio-data/`)
+
+Copy `.env.example` to `.env`, set `GEMINI_API_KEY`, then run:
+
+```powershell
 npm run dev
 ```
 
-Do not use the Cloudflare dashboard's drag-and-drop upload for the source files. Use the `cloudflare:deploy` command above instead.
+### Option B: Local Cloudflare Workers + R2 simulator
+
+Create a `.dev.vars` file with `GEMINI_API_KEY=your_key_here` (never commit `.dev.vars`), then run:
+
+```powershell
+npx.cmd wrangler dev
+```

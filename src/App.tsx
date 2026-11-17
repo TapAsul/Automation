@@ -74,6 +74,58 @@ function splitDataUrl(dataUrl: string): { base64: string; mimeType: string } {
   };
 }
 
+/**
+ * Downscales oversized raw image uploads (>900 KB) before sending to Gemini API
+ * endpoints so Worker JSON parsing stays under Cloudflare Free's CPU budget.
+ * Original full-resolution `sourceDataUrl` and extracted cutouts stay untouched.
+ */
+async function prepareImageForAiRequest(
+  dataUrl: string,
+  maxDimension = 1600
+): Promise<{ base64: string; mimeType: string }> {
+  const original = splitDataUrl(dataUrl);
+  if (original.base64.length <= 1_200_000) {
+    return original;
+  }
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Image decode failed"));
+      el.src = dataUrl;
+    });
+    const scale = Math.min(
+      1,
+      maxDimension / Math.max(img.naturalWidth || 1, img.naturalHeight || 1)
+    );
+    const width = Math.max(1, Math.round(img.naturalWidth * scale));
+    const height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return original;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    const compact = canvas.toDataURL("image/jpeg", 0.86);
+    return splitDataUrl(compact);
+  } catch {
+    return original;
+  }
+}
+
+function generateClientProjectId(): string {
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return `proj_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const res = await fetch(dataUrl);
+  return await res.blob();
+}
+
 interface RawServerConcept {
   conceptIndex: number;
   title: string;
@@ -357,27 +409,52 @@ export default function App() {
       targetSourceUrl: string,
       conceptIndex?: number
     ) => {
-      const { base64, mimeType } = splitDataUrl(targetSourceUrl);
-      const res = await fetch("/api/image-studio/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          productName: targetAnalysis.productName,
-          category: targetAnalysis.category,
-          colors: targetAnalysis.colors || [],
-          material: targetAnalysis.material || "",
-          visualStyle,
-          aspectRatio,
-          mode: generationMode,
-          imageBase64: base64,
-          mimeType,
-          conceptIndex,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Image concept generation failed.");
-      }
+      const refPayload =
+        generationMode === "ai_creative"
+          ? await prepareImageForAiRequest(targetSourceUrl)
+          : null;
+      const targetIndices =
+        typeof conceptIndex === "number" ? [conceptIndex] : [0, 1, 2];
+
+      const responses = await Promise.all(
+        targetIndices.map(async (idx) => {
+          const res = await fetch("/api/image-studio/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              productName: targetAnalysis.productName,
+              category: targetAnalysis.category,
+              colors: targetAnalysis.colors || [],
+              material: targetAnalysis.material || "",
+              visualStyle,
+              aspectRatio,
+              mode: generationMode,
+              ...(refPayload
+                ? {
+                    imageBase64: refPayload.base64,
+                    mimeType: refPayload.mimeType,
+                  }
+                : {}),
+              conceptIndex: idx,
+            }),
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json?.error || "Image concept generation failed.");
+          }
+          return json as {
+            concepts?: RawServerConcept[];
+            apiWarning?: string;
+          };
+        })
+      );
+
+      const data = {
+        concepts: responses
+          .flatMap((r) => r.concepts || [])
+          .sort((a, b) => a.conceptIndex - b.conceptIndex),
+        apiWarning: responses.find((r) => r.apiWarning)?.apiWarning,
+      };
 
       if (data.apiWarning && generationMode === "ai_creative") {
         setApiWarning(
@@ -455,9 +532,10 @@ export default function App() {
 
     try {
       setStep("analyzing");
-      const { base64, mimeType } = splitDataUrl(sourceDataUrl);
+      const { base64, mimeType } =
+        await prepareImageForAiRequest(sourceDataUrl);
       const detailsParts = detailsImageDataUrl
-        ? splitDataUrl(detailsImageDataUrl)
+        ? await prepareImageForAiRequest(detailsImageDataUrl)
         : null;
 
       const analyzeRes = await fetch("/api/analyze-product", {
@@ -793,7 +871,7 @@ export default function App() {
     setVideoJobStatus("Submitting to Gemini Omni Interactions API...");
     try {
       const rawDataUrl = await urlToDataUrl(approvedVideoImgUrl);
-      const { base64, mimeType } = splitDataUrl(rawDataUrl);
+      const { base64, mimeType } = await prepareImageForAiRequest(rawDataUrl);
       const res = await fetch("/api/video-studio/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -991,7 +1069,7 @@ export default function App() {
     setVideoJobError(null);
     try {
       const rawDataUrl = await urlToDataUrl(imgUrl);
-      const { base64, mimeType } = splitDataUrl(rawDataUrl);
+      const { base64, mimeType } = await prepareImageForAiRequest(rawDataUrl);
       const res = await fetch("/api/analyze-product", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1172,7 +1250,7 @@ export default function App() {
     setIsRegeneratingCopy(true);
     try {
       const detailsParts = detailsImageDataUrl
-        ? splitDataUrl(detailsImageDataUrl)
+        ? await prepareImageForAiRequest(detailsImageDataUrl)
         : null;
       const res = await fetch("/api/regenerate-copy", {
         method: "POST",
@@ -1277,11 +1355,13 @@ export default function App() {
     setIsSavingProject(true);
     setSaveStatusMsg(null);
     try {
-      const assetsToSave: Array<{
+      const targetProjectId = projectId || generateClientProjectId();
+
+      const pendingUploads: Array<{
         id: string;
         label: string;
         kind: "source" | "cutout" | "concept" | "video" | "audio";
-        dataUrlOrBase64?: string;
+        blob?: Blob;
         jobVideoFilename?: string;
         mimeType: string;
         style?: string;
@@ -1292,31 +1372,31 @@ export default function App() {
       }> = [];
 
       if (sourceDataUrl) {
-        assetsToSave.push({
+        pendingUploads.push({
           id: "source_product",
           label: "Original Product",
           kind: "source",
-          dataUrlOrBase64: sourceDataUrl,
+          blob: await dataUrlToBlob(sourceDataUrl),
           mimeType: splitDataUrl(sourceDataUrl).mimeType,
         });
       }
 
       if (cutout?.cutoutDataUrl) {
-        assetsToSave.push({
+        pendingUploads.push({
           id: "exact_cutout",
           label: "Extracted Cutout",
           kind: "cutout",
-          dataUrlOrBase64: cutout.cutoutDataUrl,
+          blob: await dataUrlToBlob(cutout.cutoutDataUrl),
           mimeType: "image/png",
         });
       }
 
       for (const c of concepts) {
-        assetsToSave.push({
+        pendingUploads.push({
           id: `concept_${c.conceptIndex + 1}`,
           label: c.title,
           kind: "concept",
-          dataUrlOrBase64: c.finalImageDataUrl,
+          blob: await dataUrlToBlob(c.finalImageDataUrl),
           mimeType: "image/png",
           style: c.visualStyle,
           mode: c.mode,
@@ -1326,8 +1406,11 @@ export default function App() {
         });
       }
 
+      const keepAssetFilenames: string[] = [];
+      const existingAssetPrefix = `/api/projects/${targetProjectId}/assets/`;
+
       if (omniVideo?.jobVideoFilename) {
-        assetsToSave.push({
+        pendingUploads.push({
           id: "campaign_video_mp4",
           label: "Gemini Omni Video MP4",
           kind: "video",
@@ -1335,31 +1418,66 @@ export default function App() {
           mimeType: "video/mp4",
         });
       } else if (localVideo?.blob) {
-        const vidData = await fileToDataUrl(localVideo.blob);
-        assetsToSave.push({
+        pendingUploads.push({
           id: "campaign_video_local",
           label: "Exact Product Showcase Video",
           kind: "video",
-          dataUrlOrBase64: vidData,
+          blob: localVideo.blob,
           mimeType: localVideo.mimeType,
         });
+      } else if (omniVideo?.videoUrl?.startsWith(existingAssetPrefix)) {
+        const prevFilename = decodeURIComponent(
+          omniVideo.videoUrl.slice(existingAssetPrefix.length).split("?")[0]
+        );
+        if (prevFilename) keepAssetFilenames.push(prevFilename);
       }
       if (flowVideo?.blob) {
-        const flowData = await fileToDataUrl(flowVideo.blob);
-        assetsToSave.push({
+        pendingUploads.push({
           id: "google_flow_upload",
           label: flowVideo.label || "Uploaded Google Flow Video",
           kind: "video",
-          dataUrlOrBase64: flowData,
+          blob: flowVideo.blob,
           mimeType: flowVideo.mimeType,
         });
+      }
+
+      // Stream each asset directly as raw binary to R2/storage (no large base64 JSON payloads)
+      const uploadedAssets = [];
+      for (const item of pendingUploads) {
+        const params = new URLSearchParams({
+          label: item.label,
+          kind: item.kind,
+          mimeType: item.mimeType,
+        });
+        if (item.jobVideoFilename) {
+          params.set("jobVideoFilename", item.jobVideoFilename);
+        }
+        if (item.style) params.set("style", item.style);
+        if (item.mode) params.set("mode", item.mode);
+        if (item.direction) params.set("direction", item.direction);
+        if (item.aspectRatio) params.set("aspectRatio", item.aspectRatio);
+        if (item.engine) params.set("engine", item.engine);
+
+        const uploadRes = await fetch(
+          `/api/projects/${encodeURIComponent(targetProjectId)}/assets/${encodeURIComponent(item.id)}?${params.toString()}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": item.mimeType.split(";")[0] || "application/octet-stream",
+            },
+            body: item.blob ?? undefined,
+          }
+        );
+        if (uploadRes.ok) {
+          uploadedAssets.push(await uploadRes.json());
+        }
       }
 
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: projectId || undefined,
+          id: targetProjectId,
           name: campaignName.trim() || `${analysis.productName} Campaign`,
           campaignType,
           clientOrBrandName,
@@ -1372,7 +1490,8 @@ export default function App() {
           motionPrompt,
           notes: campaignNotes,
           analysis,
-          assetsToSave,
+          uploadedAssets,
+          ...(keepAssetFilenames.length > 0 ? { keepAssetFilenames } : {}),
         }),
       });
       const saved = (await res.json()) as StoredProjectFull;
