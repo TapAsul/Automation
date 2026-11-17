@@ -7,7 +7,7 @@
     "enabled": true
   },
   "vars": {
-    "R2_ACCOUNT_ID": "REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID",
+    "R2_ACCOUNT_ID": "e2e1c2156f3fb83300201f9abe15b2e3",
     "R2_BUCKET_NAME": "klipcart-studio-data"
   },
   "containers": [
