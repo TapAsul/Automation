@@ -894,9 +894,7 @@ export default function App() {
     setVideoJobError(null);
     setVideoJobStatus("Generating voiceover...");
     try {
-      if (!activeVoiceoverScript.trim()) throw new Error("Enter or generate a voiceover script first.");
-      const voiceover = voiceoverSyncedKey === voiceoverKey && voiceoverBase64 ? voiceoverBase64 : await handleSynthesizeVoiceover();
-      if (!voiceover) throw new Error("Voiceover could not be generated. Please retry.");
+      const voiceover = await ensureVideoVoiceover();
       setVideoJobStatus("Submitting to Gemini Omni Interactions API...");
       const rawDataUrl = await urlToDataUrl(approvedVideoImgUrl);
       const { base64, mimeType } = await prepareImageForAiRequest(rawDataUrl);
@@ -950,9 +948,7 @@ export default function App() {
     setVideoJobError(null);
     setVideoJobStatus("Extending video via previous_interaction_id...");
     try {
-      if (!activeVoiceoverScript.trim()) throw new Error("Enter or generate a voiceover script first.");
-      const voiceover = voiceoverSyncedKey === voiceoverKey && voiceoverBase64 ? voiceoverBase64 : await handleSynthesizeVoiceover();
-      if (!voiceover) throw new Error("Voiceover could not be generated. Please retry.");
+      const voiceover = await ensureVideoVoiceover();
       const res = await fetch("/api/video-studio/extend", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1016,7 +1012,7 @@ export default function App() {
     }
   };
 
-  const handleGenerateVoiceoverScript = async () => {
+  const handleGenerateVoiceoverScript = async (): Promise<string | null> => {
     const productTitle =
       analysis?.productName || approvedVideoImgLabel || sourceLabel || "Produkto";
     setIsGeneratingVoiceScript(true);
@@ -1042,22 +1038,25 @@ export default function App() {
       if (!res.ok || !data.voiceoverText) {
         throw new Error(data?.error || "Voiceover script generation failed.");
       }
-      handleUpdateVoiceoverScript(data.voiceoverText as string);
+      const generated = (data.voiceoverText as string).trim();
+      handleUpdateVoiceoverScript(generated);
       void refreshMetadata();
+      return generated;
     } catch (err: unknown) {
       setVoiceoverError(
         err instanceof Error
           ? err.message
           : "Could not generate voiceover script."
       );
+      return null;
     } finally {
       setIsGeneratingVoiceScript(false);
     }
   };
 
   // Preserved Local Studio + TTS Voiceover Compositor
-  const handleSynthesizeVoiceover = async (): Promise<string | null> => {
-    const scriptText = activeVoiceoverScript.trim();
+  const handleSynthesizeVoiceover = async (text = activeVoiceoverScript): Promise<string | null> => {
+    const scriptText = text.trim();
     if (!scriptText) return null;
     setIsSynthesizingVoiceover(true);
     setVoiceoverError(null);
@@ -1078,7 +1077,7 @@ export default function App() {
         throw new Error(data?.error || "Voiceover synthesis failed.");
       }
       setVoiceoverBase64(data.audioBase64);
-      setVoiceoverSyncedKey(voiceoverKey);
+      setVoiceoverSyncedKey([voiceName, voiceoverLangMode, voiceoverStyle, voiceoverPace, scriptText].join("|"));
       const bin = atob(data.audioBase64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -1094,6 +1093,17 @@ export default function App() {
     } finally {
       setIsSynthesizingVoiceover(false);
     }
+  };
+
+  const ensureVideoVoiceover = async (): Promise<string> => {
+    const script = activeVoiceoverScript.trim() || await handleGenerateVoiceoverScript();
+    if (!script) throw new Error("Could not create a voiceover script. Please try again.");
+    const key = [voiceName, voiceoverLangMode, voiceoverStyle, voiceoverPace, script].join("|");
+    const audio = voiceoverSyncedKey === key && voiceoverBase64
+      ? voiceoverBase64
+      : await handleSynthesizeVoiceover(script);
+    if (!audio) throw new Error("Could not generate voiceover audio. Please try again.");
+    return audio;
   };
 
   const handleAnalyzeStagedImage = async () => {
@@ -1200,11 +1210,7 @@ export default function App() {
         throw new Error("Could not prepare product cutout layer.");
       }
 
-      let vo = overrideVo ?? (voiceoverSyncedKey === voiceoverKey ? voiceoverBase64 : null);
-      if (!vo && activeVoiceoverScript.trim()) {
-        vo = await handleSynthesizeVoiceover();
-        if (!vo) throw new Error("Voiceover could not be generated. Please retry before rendering.");
-      }
+      const vo = overrideVo ?? await ensureVideoVoiceover();
 
       const matchingConceptBg =
         concepts.find((c) => c.finalImageDataUrl === approvedVideoImgUrl)
