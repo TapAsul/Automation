@@ -242,6 +242,7 @@ export default function App() {
   const [voiceoverPace, setVoiceoverPace] = useState<VoiceoverPace>("natural");
   const [voiceoverScriptDraft, setVoiceoverScriptDraft] = useState<string>("");
   const [voiceoverBase64, setVoiceoverBase64] = useState<string | null>(null);
+  const [voiceoverSyncedKey, setVoiceoverSyncedKey] = useState<string | null>(null);
   const [voiceoverUrl, setVoiceoverUrl] = useState<string | null>(null);
   const [voiceoverError, setVoiceoverError] = useState<string | null>(null);
   const [isGeneratingVoiceScript, setIsGeneratingVoiceScript] = useState(false);
@@ -718,6 +719,9 @@ export default function App() {
     }
     const dataUrl = await fileToDataUrl(blob);
     setSourceDataUrl(dataUrl);
+    setVoiceoverBase64(null);
+    setVoiceoverSyncedKey(null);
+    setVoiceoverUrl(null);
     setSourceLabel(label);
     setAnalysis(null);
     setCutout(null);
@@ -964,8 +968,14 @@ export default function App() {
   const activeVoiceoverScript =
     analysis?.strategist.videoScript.voiceoverText ?? voiceoverScriptDraft;
 
+  const voiceoverKey = [voiceName, voiceoverLangMode, voiceoverStyle, voiceoverPace, activeVoiceoverScript.trim()].join("|");
+
   const handleUpdateVoiceoverScript = (nextScript: string) => {
-    setVoiceoverBase64(null);
+    if (!nextScript.trim()) {
+      setVoiceoverBase64(null);
+      setVoiceoverSyncedKey(null);
+      setVoiceoverUrl(null);
+    }
     if (analysis) {
       setAnalysis({
         ...analysis,
@@ -1044,6 +1054,7 @@ export default function App() {
         throw new Error(data?.error || "Voiceover synthesis failed.");
       }
       setVoiceoverBase64(data.audioBase64);
+      setVoiceoverSyncedKey(voiceoverKey);
       const bin = atob(data.audioBase64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -1131,7 +1142,7 @@ export default function App() {
     }
   };
 
-  const handleRenderLocalVideo = async () => {
+  const handleRenderLocalVideo = async (overrideVo?: string) => {
     const imgUrl = approvedVideoImgUrl || sourceDataUrl;
     if (!imgUrl && !cutout) {
       setLocalRenderError("Upload or select a product image first.");
@@ -1165,9 +1176,10 @@ export default function App() {
         throw new Error("Could not prepare product cutout layer.");
       }
 
-      let vo = voiceoverBase64;
+      let vo = overrideVo ?? (voiceoverSyncedKey === voiceoverKey ? voiceoverBase64 : null);
       if (!vo && activeVoiceoverScript.trim()) {
         vo = await handleSynthesizeVoiceover();
+        if (!vo) throw new Error("Voiceover could not be generated. Please retry before rendering.");
       }
 
       const matchingConceptBg =
@@ -1209,6 +1221,14 @@ export default function App() {
       );
     } finally {
       setIsRenderingLocalVideo(false);
+    }
+  };
+
+  const handleGenerateAndConnectVoiceover = async () => {
+    unlockAudioContext();
+    const voiceover = await handleSynthesizeVoiceover();
+    if (voiceover && (approvedVideoImgUrl || sourceDataUrl || cutout)) {
+      await handleRenderLocalVideo(voiceover);
     }
   };
 
@@ -1614,6 +1634,7 @@ export default function App() {
       setFlowVideo(null);
       setVoiceoverUrl(null);
       setVoiceoverBase64(null);
+      setVoiceoverSyncedKey(null);
       setVoiceoverScriptDraft("");
       setVoiceoverError(null);
       setErrorMsg(null);
@@ -1779,22 +1800,18 @@ export default function App() {
           onChangeVoiceoverScript={handleUpdateVoiceoverScript}
           onChangeVoiceName={(v) => {
             setVoiceName(v);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverLangMode={(m) => {
             setVoiceoverLangMode(m);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverStyle={(s) => {
             setVoiceoverStyle(s);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverPace={(p) => {
             setVoiceoverPace(p);
-            setVoiceoverBase64(null);
           }}
           onGenerateVoiceoverScript={() => void handleGenerateVoiceoverScript()}
-          onSynthesizeVoiceover={() => void handleSynthesizeVoiceover()}
+          onSynthesizeVoiceover={() => void handleGenerateAndConnectVoiceover()}
           onUpdateGoogleFlowPrompt={(p) =>
             analysis &&
             setAnalysis({
@@ -1836,19 +1853,15 @@ export default function App() {
           onChangeProductDetails={setProductDetails}
           onChangeVoiceName={(v) => {
             setVoiceName(v);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverLangMode={(m) => {
             setVoiceoverLangMode(m);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverStyle={(s) => {
             setVoiceoverStyle(s);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverPace={(p) => {
             setVoiceoverPace(p);
-            setVoiceoverBase64(null);
           }}
           onUpdateAnalysis={setAnalysis}
           onSelectHook={handleSelectHook}
@@ -1856,7 +1869,7 @@ export default function App() {
             void handleRegenerateCopy(dir, scope, brief)
           }
           onGenerateVoiceoverScript={() => void handleGenerateVoiceoverScript()}
-          onSynthesizeVoiceover={() => void handleSynthesizeVoiceover()}
+          onSynthesizeVoiceover={() => void handleGenerateAndConnectVoiceover()}
           onNavigate={setActiveSection}
         />
       )}
@@ -1902,19 +1915,15 @@ export default function App() {
           onChangeCampaignObjectives={setCampaignObjectives}
           onChangeVoiceName={(v) => {
             setVoiceName(v);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverLangMode={(m) => {
             setVoiceoverLangMode(m);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverStyle={(s) => {
             setVoiceoverStyle(s);
-            setVoiceoverBase64(null);
           }}
           onChangeVoiceoverPace={(p) => {
             setVoiceoverPace(p);
-            setVoiceoverBase64(null);
           }}
           onUpdateAnalysis={setAnalysis}
           onSelectHook={handleSelectHook}
@@ -1923,7 +1932,7 @@ export default function App() {
           }
           onRegenerateConcept={(idx) => void handleRegenerateConcept(idx)}
           onGenerateVoiceoverScript={() => void handleGenerateVoiceoverScript()}
-          onSynthesizeVoiceover={() => void handleSynthesizeVoiceover()}
+          onSynthesizeVoiceover={() => void handleGenerateAndConnectVoiceover()}
           onSaveProject={() => void handleSaveProject()}
           onNavigate={setActiveSection}
         />

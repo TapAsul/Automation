@@ -1,3 +1,4 @@
+import { ensurePlayableTtsAudio } from "./ttsAudio";
 import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai/web";
 import { generateAdConcepts } from "./imageService.js";
 import {
@@ -1131,10 +1132,10 @@ Include: competitiveAngle, 3 hooks, 3 headlines, productDescription, caption, 6â
 
         const paceDirective =
           paceKey === "mabilis"
-            ? "Target 22-28 brisk spoken words for fast-paced pacing."
+            ? "Target 20-25 brisk spoken words for fast-paced pacing."
             : paceKey === "mabagal"
-              ? "Target 15-20 clear, unhurried spoken words with natural pauses."
-              : "Target 18-23 natural spoken words (~9-11 seconds spoken so it finishes cleanly inside a 12-second video).";
+              ? "Target 14-18 clear, unhurried spoken words with natural pauses."
+              : "Target 17-22 natural spoken words (~9-11 seconds spoken so it finishes cleanly inside a 12-second video).";
 
         const facts = [
           `Product: ${cleanName}`,
@@ -1386,8 +1387,7 @@ Instructions:
           `${chosenVoice}:${languageMode}`
         );
         return jsonResponse({
-          audioBase64: base64Audio,
-          mimeType,
+          ...ensurePlayableTtsAudio(base64Audio, mimeType),
         });
       } catch (error: unknown) {
         if (error instanceof JsonParseError) {
