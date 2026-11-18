@@ -1134,7 +1134,7 @@ Include: competitiveAngle, 3 hooks, 3 headlines, productDescription, caption, 6â
             ? "Target 22-28 brisk spoken words for fast-paced pacing."
             : paceKey === "mabagal"
               ? "Target 15-20 clear, unhurried spoken words with natural pauses."
-              : "Target 18-25 natural spoken words (~10-14 seconds spoken).";
+              : "Target 18-23 natural spoken words (~9-11 seconds spoken so it finishes cleanly inside a 12-second video).";
 
         const facts = [
           `Product: ${cleanName}`,

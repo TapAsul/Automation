@@ -210,7 +210,7 @@ export default function App() {
     "Cinematic Product Reveal"
   );
   const [motionPrompt, setMotionPrompt] = useState<string>("");
-  const [videoDurationSec, setVideoDurationSec] = useState<number>(15);
+  const [videoDurationSec, setVideoDurationSec] = useState<number>(12);
   const [showLayerOverlays, setShowLayerOverlays] = useState<boolean>(true);
   const [omniVideo, setOmniVideo] = useState<GeneratedVideoResult | null>(null);
   const [localVideo, setLocalVideo] = useState<GeneratedVideoResult | null>(
