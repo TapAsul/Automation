@@ -453,7 +453,7 @@ export const CampaignStudioView: React.FC<CampaignStudioViewProps> = ({
                 >
                   <div className="aspect-[9/16] rounded-lg overflow-hidden bg-slate-900 flex items-center justify-center">
                     {concept ? (
-                      <img
+                      <img decoding="async"
                         src={concept.finalImageDataUrl}
                         alt={concept.title}
                         className="w-full h-full object-contain"

@@ -329,7 +329,7 @@ export const ExportCenterView: React.FC<ExportCenterViewProps> = ({
                     <audio src={item.url} controls className="w-full" />
                   </div>
                 ) : (
-                  <img
+                  <img decoding="async"
                     src={item.url}
                     alt={item.title}
                     className="w-full h-full object-contain"

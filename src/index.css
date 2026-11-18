@@ -8,6 +8,14 @@
 }
 
 @layer base {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: clip;
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior-x: none;
+  }
+
   body {
     font-family: var(--font-sans);
     background-color: #0b0f17;
@@ -16,6 +24,56 @@
 
   h1, h2, h3, h4, .font-display {
     font-family: var(--font-display);
+  }
+
+  button,
+  a,
+  label,
+  input,
+  select,
+  textarea {
+    touch-action: manipulation;
+  }
+}
+
+/* Prevent any grid column from stretching wider than mobile screens */
+.grid > * {
+  min-width: 0;
+}
+
+/* Smooth momentum horizontal scroll for the mobile tab bar */
+header nav {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+header nav::-webkit-scrollbar {
+  display: none;
+}
+
+/* Keep all workspace action buttons cleanly inside cards on phones */
+@media (max-width: 639px) {
+  main button,
+  main a,
+  main label {
+    max-width: 100%;
+  }
+
+  main button.whitespace-nowrap,
+  main a.whitespace-nowrap,
+  main label.whitespace-nowrap {
+    white-space: normal;
+    text-align: center;
+    justify-content: center;
+  }
+}
+
+/* Avoid expensive real-time backdrop-filter GPU tile drops on phones/tablets */
+@media (max-width: 1023px) {
+  .backdrop-blur-sm,
+  .backdrop-blur-md,
+  .backdrop-blur-lg {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
   }
 }
 

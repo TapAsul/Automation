@@ -52,7 +52,7 @@ export const StudioShell: React.FC<StudioShellProps> = ({
     NAV_ITEMS.find((n) => n.id === activeSection) || NAV_ITEMS[0];
 
   return (
-    <div className="min-h-screen flex bg-[#0B0F17] text-slate-100">
+    <div className="min-h-screen w-full max-w-full overflow-x-clip flex bg-[#0B0F17] text-slate-100">
       {/* Desktop Left Sidebar (240px) */}
       <aside className="hidden lg:flex lg:w-60 lg:flex-col lg:fixed lg:inset-y-0 border-r border-slate-800/90 bg-[#0D121C]">
         <div className="h-16 px-5 border-b border-slate-800/90 flex items-center">
@@ -126,7 +126,7 @@ export const StudioShell: React.FC<StudioShellProps> = ({
       {/* Main Column */}
       <div className="flex-1 flex flex-col min-w-0 lg:pl-60">
         {/* Top Context Header */}
-        <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-[#0B0F17]/95 backdrop-blur-md">
+        <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-[#0B0F17] lg:bg-[#0B0F17]/95 lg:backdrop-blur-md transform-gpu">
           <div className="mx-auto max-w-[1320px] px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0">
               <button
@@ -199,7 +199,7 @@ export const StudioShell: React.FC<StudioShellProps> = ({
         </header>
 
         {/* Main Workspace Content */}
-        <main className="flex-1 mx-auto w-full max-w-[1320px] px-4 sm:px-6 py-6 sm:py-8">
+        <main className="flex-1 min-w-0 mx-auto w-full max-w-[1320px] px-3.5 sm:px-6 py-5 sm:py-8">
           {children}
         </main>
       </div>

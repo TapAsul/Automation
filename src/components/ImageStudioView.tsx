@@ -288,7 +288,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
             {sourceDataUrl ? (
               <div className="flex items-center gap-4 text-left">
                 <div className="w-24 h-24 rounded-lg border border-slate-800 bg-slate-900 overflow-hidden shrink-0 flex items-center justify-center">
-                  <img
+                  <img decoding="async"
                     src={sourceDataUrl}
                     alt={sourceLabel || "Uploaded product"}
                     className="w-full h-full object-contain"
@@ -334,7 +334,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
                   className="rounded-lg border border-slate-800 bg-[#0B0F17] hover:border-slate-600 p-1.5 text-left cursor-pointer disabled:opacity-50"
                 >
                   <div className="aspect-square rounded overflow-hidden bg-slate-900 mb-1">
-                    <img
+                    <img decoding="async"
                       src={sample.imagePath}
                       alt={sample.label}
                       className="w-full h-full object-cover"
@@ -378,7 +378,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
 
             {detailsImageDataUrl ? (
               <div className="flex items-center gap-3 rounded-lg border border-slate-800 bg-[#121824] p-2">
-                <img
+                <img decoding="async"
                   src={detailsImageDataUrl}
                   alt={detailsImageLabel}
                   className="w-11 h-11 rounded object-cover border border-slate-700"
@@ -724,7 +724,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
             {cutout && (
               <div className="flex items-center gap-3">
                 <div className="w-14 h-14 rounded-lg border border-slate-700 bg-checkerboard p-1 flex items-center justify-center">
-                  <img
+                  <img decoding="async"
                     src={cutout.cutoutDataUrl}
                     alt="Extracted cutout"
                     className="max-w-full max-h-full object-contain"
@@ -864,7 +864,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
                 >
                   {/* Visual Viewport */}
                   <div className="relative aspect-[9/16] bg-[#0B0F17] overflow-hidden flex items-center justify-center">
-                    <img
+                    <img decoding="async"
                       src={concept.finalImageDataUrl}
                       alt={concept.title}
                       className="w-full h-full object-contain"
@@ -878,7 +878,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
                           clipPath: `inset(0 ${100 - compareSplit}% 0 0)`,
                         }}
                       >
-                        <img
+                        <img decoding="async"
                           src={sourceDataUrl}
                           alt="Original product"
                           className="w-full h-full object-contain"
@@ -1069,7 +1069,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
                       className="rounded-lg border border-slate-800 bg-slate-900/70 p-1.5 space-y-1.5"
                     >
                       <div className="aspect-[9/16] rounded overflow-hidden bg-[#0B0F17]">
-                        <img
+                        <img decoding="async"
                           src={c.finalImageDataUrl}
                           alt={c.title}
                           className="w-full h-full object-contain"

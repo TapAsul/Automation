@@ -188,5 +188,5 @@ export async function compositeExactProductOverBackground(params: {
     ctx.restore();
   }
 
-  return canvas.toDataURL("image/png");
+  return canvas.toDataURL("image/jpeg", 0.92);
 }

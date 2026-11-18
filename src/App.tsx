@@ -500,7 +500,7 @@ export default function App() {
               mode: generationMode,
               concepts: hydrated,
             },
-            ...prev.slice(0, 7),
+            ...prev.slice(0, 3),
           ]);
         }
         if (hydrated[0] && !approvedVideoImgUrl) {
@@ -1397,7 +1397,7 @@ export default function App() {
           label: c.title,
           kind: "concept",
           blob: await dataUrlToBlob(c.finalImageDataUrl),
-          mimeType: "image/png",
+          mimeType: splitDataUrl(c.finalImageDataUrl).mimeType,
           style: c.visualStyle,
           mode: c.mode,
           direction: c.direction,

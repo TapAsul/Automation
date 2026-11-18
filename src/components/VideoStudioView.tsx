@@ -536,7 +536,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                         }`}
                       >
                         <div className="aspect-[9/16] rounded-lg overflow-hidden bg-slate-900 mb-1.5">
-                          <img
+                          <img decoding="async"
                             src={item.url}
                             alt={item.label}
                             className="w-full h-full object-contain"
@@ -551,7 +551,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                 </div>
               ) : approvedImageDataUrl ? (
                 <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-[#121824] p-3">
-                  <img
+                  <img decoding="async"
                     src={approvedImageDataUrl}
                     alt={approvedImageLabel}
                     className="w-14 h-20 rounded-lg object-contain border border-slate-700 bg-slate-900"
@@ -847,7 +847,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                       Preserves exact product pixels while animating backdrop,
                       lighting, and framing.
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                       {localVideo && !isRenderingLocalVideo && (
                         <button
                           type="button"
@@ -862,7 +862,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                         type="button"
                         disabled={!approvedImageDataUrl || isRenderingLocalVideo}
                         onClick={onRenderLocalVideo}
-                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs sm:text-sm font-semibold cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 sm:px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs sm:text-sm font-semibold cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
                       >
                         {isRenderingLocalVideo ? (
                           <>
@@ -973,7 +973,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                           !aiModelAvailable
                         }
                         onClick={onSubmitOmniVideo}
-                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs sm:text-sm font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 sm:px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs sm:text-sm font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
                       >
                         {isGeneratingVideo ? (
                           <>
@@ -1036,7 +1036,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                       ref={showcaseVideoRef}
                       key={displayedShowcaseVideo.videoUrl}
                       src={displayedShowcaseVideo.videoUrl}
-                      poster={approvedImageDataUrl || undefined}
+                      preload="metadata"
                       controls
                       playsInline
                       loop
@@ -1097,7 +1097,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                   </div>
                 ) : approvedImageDataUrl ? (
                   <div className="relative w-full h-full">
-                    <img
+                    <img decoding="async"
                       src={approvedImageDataUrl}
                       alt={approvedImageLabel}
                       className="w-full h-full object-contain opacity-65"
