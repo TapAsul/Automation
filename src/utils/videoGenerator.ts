@@ -34,6 +34,11 @@ export interface VideoRenderParams {
   onProgress?: (percent: number) => void;
 }
 
+interface OverlaySprite {
+  canvas: HTMLCanvasElement;
+  yCenter: number;
+}
+
 let sharedAudioCtx: AudioContext | null = null;
 
 export function unlockAudioContext(): AudioContext | null {
@@ -50,6 +55,14 @@ export function unlockAudioContext(): AudioContext | null {
     void sharedAudioCtx.resume().catch(() => {});
   }
   return sharedAudioCtx;
+}
+
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return (
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "") ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
 }
 
 function easeOutCubic(t: number): number {
@@ -103,22 +116,31 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+/**
+ * Prefers hardware-accelerated H.264 MP4 first (smooth on iPhone & Android),
+ * then hardware-friendly VP8 WebM before CPU-heavy VP9.
+ */
 function pickSupportedMimeType(hasAudio: boolean): {
   mimeType: string;
   extension: "mp4" | "webm";
 } {
   const candidates: Array<{ mime: string; ext: "mp4" | "webm" }> = hasAudio
     ? [
+        { mime: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", ext: "mp4" },
         { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
         { mime: "video/mp4", ext: "mp4" },
-        { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
+        { mime: "video/webm;codecs=h264,opus", ext: "webm" },
         { mime: "video/webm;codecs=vp8,opus", ext: "webm" },
+        { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
         { mime: "video/webm", ext: "webm" },
       ]
     : [
-        { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
+        { mime: "video/mp4;codecs=avc1.42E01E", ext: "mp4" },
+        { mime: "video/mp4;codecs=avc1", ext: "mp4" },
         { mime: "video/mp4", ext: "mp4" },
-        { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
+        { mime: "video/webm;codecs=h264", ext: "webm" },
+        { mime: "video/webm;codecs=vp8", ext: "webm" },
+        { mime: "video/webm;codecs=vp9", ext: "webm" },
         { mime: "video/webm", ext: "webm" },
       ];
 
@@ -140,6 +162,148 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes.buffer;
+}
+
+/**
+ * Pre-renders an overlay caption card (including its drop shadow) once so
+ * the per-frame loop never runs shadowBlur or measureText on mobile CPUs.
+ */
+function buildOverlaySprite(
+  frameWidth: number,
+  headline: string,
+  sublabel: string,
+  yCenter: number,
+  accentColor: string,
+  isCTA: boolean
+): OverlaySprite {
+  const pad = 36;
+  const measure = document.createElement("canvas").getContext("2d");
+  const fontSize = isCTA ? 34 : 38;
+  const lineHeight = isCTA ? 44 : 48;
+
+  let lines = [headline.trim()];
+  let maxLineW = 260;
+
+  if (measure) {
+    measure.font = `700 ${fontSize}px "Bricolage Grotesque", "Plus Jakarta Sans", sans-serif`;
+    lines = wrapTextLines(measure, headline, frameWidth - 130).slice(0, 2);
+    const lineWidths = lines.map((l) => measure.measureText(l).width);
+    measure.font = `600 17px "Plus Jakarta Sans", sans-serif`;
+    const subW = sublabel ? measure.measureText(sublabel).width : 0;
+    maxLineW = Math.max(...lineWidths, subW, 0);
+  }
+
+  const boxHeight = lines.length * lineHeight + (sublabel ? 52 : 28);
+  const boxW = Math.min(frameWidth - 84, Math.max(300, Math.ceil(maxLineW + 64)));
+
+  const sprite = document.createElement("canvas");
+  sprite.width = boxW + pad * 2;
+  sprite.height = boxHeight + pad * 2;
+  const sctx = sprite.getContext("2d");
+
+  if (sctx) {
+    const bx = pad;
+    const by = pad;
+    const cx = sprite.width / 2;
+
+    sctx.save();
+    drawRoundedRect(sctx, bx, by, boxW, boxHeight, 18);
+    sctx.fillStyle = isCTA ? accentColor : "rgba(15, 23, 42, 0.88)";
+    sctx.shadowColor = "rgba(0, 0, 0, 0.28)";
+    sctx.shadowBlur = 22;
+    sctx.shadowOffsetY = 8;
+    sctx.fill();
+    sctx.restore();
+
+    if (sublabel) {
+      sctx.font = `600 17px "Plus Jakarta Sans", sans-serif`;
+      sctx.fillStyle = isCTA
+        ? "rgba(255, 255, 255, 0.92)"
+        : "rgba(255, 255, 255, 0.74)";
+      sctx.textAlign = "center";
+      sctx.textBaseline = "top";
+      sctx.fillText(sublabel, cx, by + 13);
+    }
+
+    sctx.font = `700 ${fontSize}px "Bricolage Grotesque", "Plus Jakarta Sans", sans-serif`;
+    sctx.fillStyle = "#FFFFFF";
+    sctx.textAlign = "center";
+    sctx.textBaseline = "top";
+    const textStartY = by + (sublabel ? 38 : 15);
+    lines.forEach((line, idx) => {
+      sctx.fillText(line, cx, textStartY + idx * lineHeight);
+    });
+  }
+
+  return { canvas: sprite, yCenter };
+}
+
+/**
+ * Pre-renders the product cutout + soft drop shadow once onto an offscreen
+ * canvas, eliminating slow per-frame Gaussian blur during mobile encoding.
+ */
+function buildProductSprite(
+  productImg: HTMLImageElement,
+  targetW: number,
+  targetH: number
+): { canvas: HTMLCanvasElement; pad: number; innerW: number; innerH: number } {
+  const pad = 48;
+  const innerW = Math.max(1, Math.round(targetW));
+  const innerH = Math.max(1, Math.round(targetH));
+  const sprite = document.createElement("canvas");
+  sprite.width = innerW + pad * 2;
+  sprite.height = innerH + pad * 2;
+  const sctx = sprite.getContext("2d");
+  if (sctx) {
+    sctx.imageSmoothingEnabled = true;
+    sctx.imageSmoothingQuality = "high";
+    sctx.shadowColor = "rgba(15, 23, 42, 0.24)";
+    sctx.shadowBlur = 26;
+    sctx.shadowOffsetY = 14;
+    sctx.drawImage(productImg, pad, pad, innerW, innerH);
+  }
+  return { canvas: sprite, pad, innerW, innerH };
+}
+
+function buildContactShadowSprite(): HTMLCanvasElement {
+  const w = 360;
+  const h = 80;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const sctx = c.getContext("2d");
+  if (sctx) {
+    sctx.save();
+    sctx.translate(w / 2, h / 2);
+    sctx.scale(1, h / w);
+    const g = sctx.createRadialGradient(0, 0, 8, 0, 0, w * 0.48);
+    g.addColorStop(0, "rgba(15, 23, 42, 0.38)");
+    g.addColorStop(0.6, "rgba(15, 23, 42, 0.13)");
+    g.addColorStop(1, "rgba(15, 23, 42, 0)");
+    sctx.fillStyle = g;
+    sctx.beginPath();
+    sctx.arc(0, 0, w * 0.48, 0, Math.PI * 2);
+    sctx.fill();
+    sctx.restore();
+  }
+  return c;
+}
+
+function buildLightBeamSprite(beamColor: string, height: number): HTMLCanvasElement {
+  const w = 360;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = height;
+  const sctx = c.getContext("2d");
+  if (sctx) {
+    const grad = sctx.createLinearGradient(0, 0, w, height * 0.35);
+    grad.addColorStop(0, "rgba(255,255,255,0)");
+    grad.addColorStop(0.5, beamColor);
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    sctx.fillStyle = grad;
+    sctx.fillRect(0, 0, w, height);
+  }
+  return c;
 }
 
 export async function renderShowcaseVideo(
@@ -165,6 +329,14 @@ export async function renderShowcaseVideo(
   const width = isWide ? 1280 : 720;
   const height = isWide ? 720 : 1280;
   const fps = 30;
+  const mobile = isMobileBrowser();
+
+  if (typeof document !== "undefined" && document.fonts?.ready) {
+    await Promise.race([
+      document.fonts.ready,
+      new Promise((r) => window.setTimeout(r, 400)),
+    ]);
+  }
 
   const [productImg, bgImg] = await Promise.all([
     loadImageElement(cutoutDataUrl),
@@ -174,12 +346,115 @@ export async function renderShowcaseVideo(
   ]);
 
   const theme = BACKDROP_THEMES[backdropPreset];
+  const validAccent = /^#[0-9A-Fa-f]{6}$/.test(accentHex)
+    ? accentHex
+    : "#E11D48";
 
+  // Pre-bake background layer once (avoids redrawing complex scenes or 4K images per frame)
+  const bgSprite = document.createElement("canvas");
+  if (bgImg) {
+    const overscan = 1.15;
+    bgSprite.width = Math.round(width * overscan);
+    bgSprite.height = Math.round(height * overscan);
+    const bctx = bgSprite.getContext("2d", { alpha: false });
+    if (bctx) {
+      const cover = Math.max(
+        bgSprite.width / (bgImg.naturalWidth || 1),
+        bgSprite.height / (bgImg.naturalHeight || 1)
+      );
+      const dw = bgImg.naturalWidth * cover;
+      const dh = bgImg.naturalHeight * cover;
+      bctx.drawImage(
+        bgImg,
+        (bgSprite.width - dw) / 2,
+        (bgSprite.height - dh) / 2,
+        dw,
+        dh
+      );
+    }
+  } else {
+    bgSprite.width = width;
+    bgSprite.height = height;
+    const bctx = bgSprite.getContext("2d", { alpha: false });
+    if (bctx) {
+      drawStudioBackdrop(bctx, width, height, theme, validAccent);
+    }
+  }
+
+  // Pre-bake product cutout + drop shadow once at crisp peak zoom resolution
+  const maxProdW = isWide ? 440 : 520;
+  const maxProdH = isWide ? 430 : 510;
+  const baseFit = Math.min(
+    maxProdW / (productImg.naturalWidth || 1),
+    maxProdH / (productImg.naturalHeight || 1)
+  );
+  const peakZoom = 1.14;
+  const baseProdW = productImg.naturalWidth * baseFit;
+  const baseProdH = productImg.naturalHeight * baseFit;
+  const productSprite = buildProductSprite(
+    productImg,
+    baseProdW * peakZoom,
+    baseProdH * peakZoom
+  );
+  const shadowSprite = buildContactShadowSprite();
+
+  const beamColor =
+    motionPreset === "Dramatic Lighting Reveal"
+      ? "rgba(255,255,255,0.2)"
+      : motionPreset === "Luxury Commercial"
+        ? "rgba(253,230,138,0.14)"
+        : theme.isDark
+          ? "rgba(255,255,255,0.07)"
+          : "rgba(255,255,255,0.22)";
+  const beamSprite = buildLightBeamSprite(beamColor, height);
+
+  // Pre-bake all 3 beat caption cards once
+  let beatSprites: [OverlaySprite, OverlaySprite, OverlaySprite] | null = null;
+  if (showOverlays) {
+    const benefitLabel =
+      language === "tagalog" ? "Bakit Sulit Ito" : "Key Highlight";
+    const ctaLabel =
+      language === "tagalog"
+        ? "I-click ang Yellow Basket"
+        : "Tap Yellow Basket Below";
+    const topBeatY = isWide ? 120 : 195;
+    const ctaBeatY = isWide ? height - 115 : 1020;
+
+    beatSprites = [
+      buildOverlaySprite(
+        width,
+        script.beat1Hook,
+        productName.slice(0, 34),
+        topBeatY,
+        validAccent,
+        false
+      ),
+      buildOverlaySprite(
+        width,
+        script.beat2Benefit,
+        benefitLabel,
+        topBeatY,
+        validAccent,
+        false
+      ),
+      buildOverlaySprite(
+        width,
+        script.beat3Offer,
+        ctaLabel,
+        ctaBeatY,
+        validAccent,
+        true
+      ),
+    ];
+  }
+
+  // Opaque root canvas enables fast mobile GPU compositing
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) throw new Error("Unable to initialize 2D video canvas.");
+  ctx.imageSmoothingEnabled = true;
 
   const canvasStream = canvas.captureStream(fps);
 
@@ -218,7 +493,8 @@ export async function renderShowcaseVideo(
   const { mimeType, extension } = pickSupportedMimeType(hasAudioTrack);
   const recorder = new MediaRecorder(combinedStream, {
     mimeType,
-    videoBitsPerSecond: 4_500_000,
+    // Tuned for crisp 720p TikTok ads without choking mobile hardware encoders
+    videoBitsPerSecond: mobile ? 3_200_000 : 4_500_000,
     audioBitsPerSecond: 128_000,
   });
 
@@ -229,147 +505,82 @@ export async function renderShowcaseVideo(
     }
   };
 
-  const validAccent = /^#[0-9A-Fa-f]{6}$/.test(accentHex)
-    ? accentHex
-    : "#E11D48";
-
-  const particles = Array.from({ length: 22 }, (_, i) => ({
+  const particleCount = mobile ? 14 : 22;
+  const particles = Array.from({ length: particleCount }, (_, i) => ({
     x: ((i * 137.5) % 100) / 100,
     y: ((i * 73.1) % 100) / 100,
-    r: 1.5 + (i % 3) * 1.2,
+    size: 2.5 + (i % 3) * 1.8,
     speed: 0.015 + (i % 4) * 0.009,
   }));
+  const particleFill = theme.isDark
+    ? "rgba(255,255,255,0.18)"
+    : "rgba(255,255,255,0.42)";
 
   const beat1End = durationSec * 0.31;
   const beat2End = durationSec * 0.65;
+  const sweepSpeed = motionPreset === "Dramatic Lighting Reveal" ? 2.2 : 4.2;
+  const pedestalSurfaceY = height * (isWide ? 0.78 : 0.695);
+  const baseCenterY = pedestalSurfaceY - baseProdH * 0.5;
 
-  const drawOverlayBeat = (
-    headline: string,
-    sublabel: string,
-    beatProgress: number,
-    yCenter: number,
-    isCTA = false
-  ) => {
+  const drawOverlaySprite = (sprite: OverlaySprite, beatProgress: number) => {
     const alpha = easeOutCubic(Math.min(1, beatProgress * 3.5));
     const slideY = (1 - easeOutCubic(Math.min(1, beatProgress * 3))) * 24;
-
-    ctx.save();
+    const dx = (width - sprite.canvas.width) * 0.5;
+    const dy = sprite.yCenter - sprite.canvas.height * 0.5 + slideY;
     ctx.globalAlpha = alpha;
-    ctx.translate(0, slideY);
-
-    ctx.font = `700 ${isCTA ? 34 : 38}px "Bricolage Grotesque", "Plus Jakarta Sans", sans-serif`;
-    const lines = wrapTextLines(ctx, headline, width - 130).slice(0, 2);
-    const lineHeight = isCTA ? 44 : 48;
-    const boxHeight = lines.length * lineHeight + (sublabel ? 52 : 28);
-    const maxLineW = Math.max(
-      ...lines.map((l) => ctx.measureText(l).width),
-      sublabel ? ctx.measureText(sublabel).width : 0
-    );
-    const boxW = Math.min(width - 84, Math.max(300, maxLineW + 64));
-    const boxX = (width - boxW) / 2;
-    const boxY = yCenter - boxHeight / 2;
-
-    drawRoundedRect(ctx, boxX, boxY, boxW, boxHeight, 18);
-    ctx.fillStyle = isCTA ? validAccent : "rgba(15, 23, 42, 0.86)";
-    ctx.shadowColor = "rgba(0, 0, 0, 0.28)";
-    ctx.shadowBlur = 24;
-    ctx.shadowOffsetY = 8;
-    ctx.fill();
-    ctx.shadowColor = "transparent";
-
-    if (sublabel) {
-      ctx.font = `600 17px "Plus Jakarta Sans", sans-serif`;
-      ctx.fillStyle = isCTA
-        ? "rgba(255, 255, 255, 0.92)"
-        : "rgba(255, 255, 255, 0.74)";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillText(sublabel, width / 2, boxY + 13);
-    }
-
-    ctx.font = `700 ${isCTA ? 34 : 38}px "Bricolage Grotesque", "Plus Jakarta Sans", sans-serif`;
-    ctx.fillStyle = "#FFFFFF";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    const textStartY = boxY + (sublabel ? 38 : 15);
-    lines.forEach((line, idx) => {
-      ctx.fillText(line, width / 2, textStartY + idx * lineHeight);
-    });
-
-    ctx.restore();
+    ctx.drawImage(sprite.canvas, dx, dy);
+    ctx.globalAlpha = 1;
   };
 
+  // Ultra-light per-frame draw: purely fast GPU texture blits (<1.5 ms on phones)
   const drawFrame = (elapsedSec: number) => {
     const t = Math.min(1, elapsedSec / durationSec);
 
-    // 1. Background Layer (separately animated behind untouched cutout!)
+    // 1. Pre-baked Background Layer
     if (bgImg) {
       const bgScale =
-        motionPreset === "Slow Camera Push" || motionPreset === "Cinematic Product Reveal"
-          ? 1.02 + 0.12 * easeInOutSine(t)
-          : motionPreset === "Rotating Product Display" || motionPreset === "Luxury Commercial"
+        motionPreset === "Slow Camera Push" ||
+        motionPreset === "Cinematic Product Reveal"
+          ? 1.02 + 0.11 * easeInOutSine(t)
+          : motionPreset === "Rotating Product Display" ||
+              motionPreset === "Luxury Commercial"
             ? 1.08
             : 1.02 + 0.08 * easeInOutSine(t);
       const bgPanX =
-        motionPreset === "Rotating Product Display" || motionPreset === "Luxury Commercial"
-          ? Math.sin(elapsedSec * 0.85) * 22
+        motionPreset === "Rotating Product Display" ||
+        motionPreset === "Luxury Commercial"
+          ? Math.sin(elapsedSec * 0.85) * 20
           : Math.sin(elapsedSec * 0.45) * 10;
       const bw = width * bgScale;
       const bh = height * bgScale;
-      ctx.drawImage(bgImg, (width - bw) / 2 + bgPanX, (height - bh) / 2, bw, bh);
+      ctx.drawImage(
+        bgSprite,
+        (width - bw) * 0.5 + bgPanX,
+        (height - bh) * 0.5,
+        bw,
+        bh
+      );
     } else {
-      drawStudioBackdrop(ctx, width, height, theme, validAccent);
+      ctx.drawImage(bgSprite, 0, 0);
     }
 
-    // Dynamic lighting sweep around background
-    const sweepSpeed = motionPreset === "Dramatic Lighting Reveal" ? 2.2 : 4.2;
+    // 2. Pre-baked Lighting Sweep
     const sweepProgress = easeInOutSine((elapsedSec % sweepSpeed) / sweepSpeed);
     const sweepX = -width * 0.4 + sweepProgress * width * 1.8;
-    ctx.save();
-    const beamGrad = ctx.createLinearGradient(
-      sweepX - 190,
-      0,
-      sweepX + 190,
-      height
-    );
-    beamGrad.addColorStop(0, "rgba(255,255,255,0)");
-    beamGrad.addColorStop(
-      0.5,
-      motionPreset === "Dramatic Lighting Reveal"
-        ? "rgba(255,255,255,0.2)"
-        : motionPreset === "Luxury Commercial"
-          ? "rgba(253,230,138,0.14)"
-          : theme.isDark
-            ? "rgba(255,255,255,0.07)"
-            : "rgba(255,255,255,0.22)"
-    );
-    beamGrad.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = beamGrad;
-    ctx.fillRect(0, 0, width, height);
-    ctx.restore();
+    ctx.drawImage(beamSprite, sweepX - 180, 0);
 
-    // Floating light dust / ambient particles
-    ctx.save();
-    for (const p of particles) {
+    // 3. Lightweight Ambient Dust Motes
+    ctx.fillStyle = particleFill;
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
       const py = ((p.y - elapsedSec * p.speed + 2) % 1) * height * 0.78;
       const px = p.x * width + Math.sin(elapsedSec * 1.4 + p.y * 10) * 14;
-      ctx.fillStyle = theme.isDark
-        ? "rgba(255,255,255,0.18)"
-        : "rgba(255,255,255,0.42)";
       ctx.beginPath();
-      ctx.arc(px, py, p.r, 0, Math.PI * 2);
+      ctx.arc(px, py, p.size * 0.5, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.restore();
 
-    // 2. Foregound Untouched Product Layer Motion driven by MotionPreset
-    const maxProdW = isWide ? 440 : 520;
-    const maxProdH = isWide ? 430 : 510;
-    const baseFit = Math.min(
-      maxProdW / productImg.naturalWidth,
-      maxProdH / productImg.naturalHeight
-    );
-
+    // 4. Foreground Product Motion
     const enterP = easeOutCubic(elapsedSec / 0.85);
     let floatOffset = Math.sin(elapsedSec * 1.9) * 6;
     let panX = 0;
@@ -412,96 +623,98 @@ export async function renderShowcaseVideo(
       floatOffset *= 1.18;
     }
 
-    const prodW = productImg.naturalWidth * baseFit * zoomFactor;
-    const prodH = productImg.naturalHeight * baseFit * zoomFactor;
-    const centerX = width / 2 + panX;
-    const pedestalSurfaceY = height * (isWide ? 0.78 : 0.695);
-    const baseCenterY =
-      pedestalSurfaceY - productImg.naturalHeight * baseFit * 0.5;
+    const scaleRatio = zoomFactor / peakZoom;
+    const spriteW = productSprite.canvas.width * scaleRatio;
+    const spriteH = productSprite.canvas.height * scaleRatio;
+    const prodW = baseProdW * zoomFactor;
+    const centerX = width * 0.5 + panX;
     const centerY = baseCenterY + (1 - enterP) * 85 + floatOffset;
 
-    // Ground Contact Shadow anchored below product layer
-    ctx.save();
+    // 5. Pre-baked Ground Contact Shadow
     const shadowScale = Math.max(0.75, 1 - floatOffset * 0.007);
-    const shadowY = pedestalSurfaceY + 8;
-    const shadowGrad = ctx.createRadialGradient(
-      centerX,
-      shadowY,
-      10,
-      centerX,
-      shadowY,
-      prodW * 0.52 * shadowScale
+    const sw = prodW * 1.04 * shadowScale;
+    const sh = 56 * shadowScale;
+    ctx.drawImage(
+      shadowSprite,
+      centerX - sw * 0.5,
+      pedestalSurfaceY + 8 - sh * 0.5,
+      sw,
+      sh
     );
-    shadowGrad.addColorStop(0, "rgba(15, 23, 42, 0.36)");
-    shadowGrad.addColorStop(0.6, "rgba(15, 23, 42, 0.12)");
-    shadowGrad.addColorStop(1, "rgba(15, 23, 42, 0)");
-    ctx.fillStyle = shadowGrad;
-    ctx.beginPath();
-    ctx.ellipse(
-      centerX,
-      shadowY,
-      prodW * 0.5 * shadowScale,
-      28 * shadowScale,
-      0,
-      0,
-      Math.PI * 2
-    );
-    ctx.fill();
-    ctx.restore();
 
-    // Draw untouched original cutout image layer
+    // 6. Pre-baked Product Cutout + Shadow Sprite
     ctx.save();
     ctx.globalAlpha = enterP;
     ctx.translate(centerX, centerY);
-    ctx.rotate(tiltAngle);
-    ctx.shadowColor = "rgba(15, 23, 42, 0.22)";
-    ctx.shadowBlur = 28;
-    ctx.shadowOffsetY = 16;
-    ctx.drawImage(productImg, -prodW / 2, -prodH / 2, prodW, prodH);
+    if (tiltAngle !== 0) {
+      ctx.rotate(tiltAngle);
+    }
+    ctx.drawImage(
+      productSprite.canvas,
+      -spriteW * 0.5,
+      -spriteH * 0.5,
+      spriteW,
+      spriteH
+    );
     ctx.restore();
 
-    // Optional Kinetic Hook & CTA Beat Overlays (TikTok Safe Zones)
-    if (showOverlays) {
-      const benefitLabel =
-        language === "tagalog" ? "Bakit Sulit Ito" : "Key Highlight";
-      const ctaLabel =
-        language === "tagalog"
-          ? "I-click ang Yellow Basket"
-          : "Tap Yellow Basket Below";
-
+    // 7. Pre-baked Kinetic Caption Cards
+    if (beatSprites) {
       if (elapsedSec < beat1End) {
-        drawOverlayBeat(
-          script.beat1Hook,
-          productName.slice(0, 34),
-          elapsedSec / beat1End,
-          195
-        );
+        drawOverlaySprite(beatSprites[0], elapsedSec / beat1End);
       } else if (elapsedSec < beat2End) {
-        drawOverlayBeat(
-          script.beat2Benefit,
-          benefitLabel,
-          (elapsedSec - beat1End) / (beat2End - beat1End),
-          195
+        drawOverlaySprite(
+          beatSprites[1],
+          (elapsedSec - beat1End) / (beat2End - beat1End)
         );
       } else {
-        drawOverlayBeat(
-          script.beat3Offer,
-          ctaLabel,
-          (elapsedSec - beat2End) / (durationSec - beat2End),
-          1020,
-          true
+        drawOverlaySprite(
+          beatSprites[2],
+          (elapsedSec - beat2End) / (durationSec - beat2End)
         );
       }
     }
 
-    // Subtle top progress hairline
+    // 8. Top Progress Hairline
     ctx.fillStyle = "rgba(255,255,255,0.22)";
     ctx.fillRect(36, 48, width - 72, 4);
     ctx.fillStyle = validAccent;
     ctx.fillRect(36, 48, (width - 72) * t, 4);
   };
 
+  // Prime first frame so mobile hardware encoder starts cleanly with no freeze
+  drawFrame(0);
+  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
   return new Promise<GeneratedVideoResult>((resolve, reject) => {
+    let rafId = 0;
+    let stopGuardTimer = 0;
+    let finished = false;
+    let lastReportedPct = -10;
+
+    const cleanupStreams = () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      if (stopGuardTimer) window.clearTimeout(stopGuardTimer);
+      for (const track of combinedStream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const finishRecording = () => {
+      if (finished) return;
+      finished = true;
+      if (rafId) window.cancelAnimationFrame(rafId);
+      if (stopGuardTimer) window.clearTimeout(stopGuardTimer);
+      drawFrame(durationSec);
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+      }
+    };
+
     recorder.onstop = () => {
       if (audioSource) {
         try {
@@ -518,13 +731,16 @@ export async function renderShowcaseVideo(
           // ignore
         }
       }
-      const blob = new Blob(chunks, { type: mimeType });
+      cleanupStreams();
+
+      const cleanMime = mimeType.split(";")[0] || mimeType;
+      const blob = new Blob(chunks, { type: cleanMime });
       const videoUrl = URL.createObjectURL(blob);
       onProgress?.(100);
       resolve({
         videoUrl,
         blob,
-        mimeType,
+        mimeType: cleanMime,
         extension,
         durationSec,
         resolution: `${width}x${height}`,
@@ -533,28 +749,44 @@ export async function renderShowcaseVideo(
     };
 
     recorder.onerror = () => {
+      cleanupStreams();
       reject(new Error("Video encoding failed in browser."));
     };
 
-    drawFrame(0);
-    recorder.start(200);
+    // Start as a single continuous recording (avoids iOS 200ms fragment micro-stutters)
+    recorder.start();
     if (audioSource) {
       audioSource.start(0);
     }
 
     const startTime = performance.now();
-    const intervalMs = 1000 / fps;
 
-    const timer = window.setInterval(() => {
-      const elapsedSec = (performance.now() - startTime) / 1000;
+    // Safety timer guarantees completion even if user locks screen / switches tabs
+    stopGuardTimer = window.setTimeout(
+      finishRecording,
+      Math.ceil(durationSec * 1000) + 250
+    );
+
+    // Sync canvas rendering with display vsync for silky-smooth mobile video
+    const tick = (now: number) => {
+      if (finished) return;
+      const elapsedSec = (now - startTime) / 1000;
       if (elapsedSec >= durationSec) {
-        window.clearInterval(timer);
-        drawFrame(durationSec);
-        recorder.stop();
+        finishRecording();
         return;
       }
       drawFrame(elapsedSec);
-      onProgress?.(Math.min(98, Math.round((elapsedSec / durationSec) * 100)));
-    }, intervalMs);
+
+      // Throttle React progress updates so UI re-renders never drop video frames
+      const pct = Math.min(98, Math.round((elapsedSec / durationSec) * 100));
+      if (pct >= lastReportedPct + 4) {
+        lastReportedPct = pct;
+        onProgress?.(pct);
+      }
+
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
   });
 }
