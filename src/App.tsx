@@ -44,6 +44,7 @@ import type {
 } from "./types/studio";
 import { removeBackgroundAndCompose } from "./utils/backgroundRemover";
 import { compositeExactProductOverBackground } from "./utils/imageCompositor";
+import { attachVoiceoverToVideo } from "./utils/attachVoiceover";
 import {
   renderShowcaseVideo,
   unlockAudioContext,
@@ -309,6 +310,12 @@ export default function App() {
       if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     };
   }, [refreshMetadata, checkVideoAvailability]);
+
+  useEffect(() => {
+    return () => {
+      if (omniVideo?.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(omniVideo.videoUrl);
+    };
+  }, [omniVideo?.videoUrl]);
 
   useEffect(() => {
     return () => {
@@ -816,9 +823,21 @@ export default function App() {
     }
   };
 
-  const pollVideoJob = (jobId: string) => {
+  const finishAiVideo = async (video: GeneratedVideoResult, voiceover: string) => {
+    setVideoJobStatus("Connecting voiceover to your video. Keep this page open...");
+    const connected = await attachVoiceoverToVideo(video, voiceover);
+    setOmniVideo(connected);
+    setVideoJobStatus("Video and voiceover connected.");
+    setIsGeneratingVideo(false);
+    void refreshMetadata();
+  };
+
+  const pollVideoJob = (jobId: string, voiceover: string) => {
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+    let checking = false;
     pollTimerRef.current = window.setInterval(async () => {
+      if (checking) return;
+      checking = true;
       try {
         const res = await fetch(`/api/video-studio/status/${jobId}`);
         const job = await res.json();
@@ -829,8 +848,7 @@ export default function App() {
         if (job.status === "completed" && job.videoUrl) {
           if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
           pollTimerRef.current = null;
-          setIsGeneratingVideo(false);
-          setOmniVideo({
+          await finishAiVideo({
             videoUrl: job.videoUrl,
             mimeType: "video/mp4",
             extension: "mp4",
@@ -840,8 +858,7 @@ export default function App() {
             jobId: job.id,
             interactionId: job.interactionId,
             jobVideoFilename: job.videoFile,
-          });
-          void refreshMetadata();
+          }, voiceover);
         } else if (job.status === "failed") {
           if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
           pollTimerRef.current = null;
@@ -856,6 +873,8 @@ export default function App() {
         setVideoJobError(
           err instanceof Error ? err.message : "Polling video job failed."
         );
+      } finally {
+        checking = false;
       }
     }, 3500);
   };
@@ -870,10 +889,15 @@ export default function App() {
       `${motionPreset} showcasing ${analysis?.productName || "this product"}, smooth commercial lighting, 30fps.`;
     if (!motionPrompt.trim()) setMotionPrompt(promptToSend);
 
+    unlockAudioContext();
     setIsGeneratingVideo(true);
     setVideoJobError(null);
-    setVideoJobStatus("Submitting to Gemini Omni Interactions API...");
+    setVideoJobStatus("Generating voiceover...");
     try {
+      if (!activeVoiceoverScript.trim()) throw new Error("Enter or generate a voiceover script first.");
+      const voiceover = voiceoverSyncedKey === voiceoverKey && voiceoverBase64 ? voiceoverBase64 : await handleSynthesizeVoiceover();
+      if (!voiceover) throw new Error("Voiceover could not be generated. Please retry.");
+      setVideoJobStatus("Submitting to Gemini Omni Interactions API...");
       const rawDataUrl = await urlToDataUrl(approvedVideoImgUrl);
       const { base64, mimeType } = await prepareImageForAiRequest(rawDataUrl);
       const res = await fetch("/api/video-studio/generate", {
@@ -894,9 +918,7 @@ export default function App() {
       }
 
       if (data.status === "completed" && data.videoUrl) {
-        setIsGeneratingVideo(false);
-        setVideoJobStatus("Completed");
-        setOmniVideo({
+        await finishAiVideo({
           videoUrl: data.videoUrl,
           mimeType: "video/mp4",
           extension: "mp4",
@@ -906,11 +928,10 @@ export default function App() {
           jobId: data.id,
           interactionId: data.interactionId,
           jobVideoFilename: data.videoFile,
-        });
-        void refreshMetadata();
+        }, voiceover);
       } else {
         setVideoJobStatus(`Queued (${data.id}) — rendering MP4...`);
-        pollVideoJob(data.id);
+        pollVideoJob(data.id, voiceover);
       }
     } catch (err: unknown) {
       setIsGeneratingVideo(false);
@@ -924,10 +945,14 @@ export default function App() {
 
   const handleExtendOmniVideo = async () => {
     if (!omniVideo?.interactionId) return;
+    unlockAudioContext();
     setIsGeneratingVideo(true);
     setVideoJobError(null);
     setVideoJobStatus("Extending video via previous_interaction_id...");
     try {
+      if (!activeVoiceoverScript.trim()) throw new Error("Enter or generate a voiceover script first.");
+      const voiceover = voiceoverSyncedKey === voiceoverKey && voiceoverBase64 ? voiceoverBase64 : await handleSynthesizeVoiceover();
+      if (!voiceover) throw new Error("Voiceover could not be generated. Please retry.");
       const res = await fetch("/api/video-studio/extend", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -942,8 +967,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Video extension failed.");
       if (data.status === "completed" && data.videoUrl) {
-        setIsGeneratingVideo(false);
-        setOmniVideo({
+        await finishAiVideo({
           videoUrl: data.videoUrl,
           mimeType: "video/mp4",
           extension: "mp4",
@@ -953,9 +977,9 @@ export default function App() {
           jobId: data.id,
           interactionId: data.interactionId,
           jobVideoFilename: data.videoFile,
-        });
+        }, voiceover);
       } else {
-        pollVideoJob(data.id);
+        pollVideoJob(data.id, voiceover);
       }
     } catch (err: unknown) {
       setIsGeneratingVideo(false);
@@ -1429,7 +1453,15 @@ export default function App() {
       const keepAssetFilenames: string[] = [];
       const existingAssetPrefix = `/api/projects/${targetProjectId}/assets/`;
 
-      if (omniVideo?.jobVideoFilename) {
+      if (omniVideo?.blob && omniVideo.hasVoiceover) {
+        pendingUploads.push({
+          id: "campaign_video_mp4",
+          label: "AI Video with Voiceover",
+          kind: "video",
+          blob: omniVideo.blob,
+          mimeType: omniVideo.mimeType,
+        });
+      } else if (omniVideo?.jobVideoFilename) {
         pendingUploads.push({
           id: "campaign_video_mp4",
           label: "Gemini Omni Video MP4",
