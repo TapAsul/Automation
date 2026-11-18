@@ -1,3 +1,4 @@
+import { downloadMediaFile } from "../utils/mobileDownload";
 import React, { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -211,12 +212,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
   };
 
   const triggerDownload = (url: string, filename: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadMediaFile(url, filename);
   };
 
   const slug = (analysis?.productName || "product-showcase")

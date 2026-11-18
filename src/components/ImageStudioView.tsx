@@ -1,3 +1,4 @@
+import { downloadMediaFile } from "../utils/mobileDownload";
 import React, { useState } from "react";
 import {
   AlertCircle,
@@ -195,12 +196,7 @@ export const ImageStudioView: React.FC<ImageStudioViewProps> = ({
     step === "generating_images";
 
   const triggerDownload = (url: string, filename: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadMediaFile(url, filename);
   };
 
   const slug = (analysis?.productName || "product-ad")

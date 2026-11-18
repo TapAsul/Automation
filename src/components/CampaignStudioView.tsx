@@ -1,3 +1,4 @@
+import { downloadMediaFile } from "../utils/mobileDownload";
 import React, { useState } from "react";
 import {
   Briefcase,
@@ -154,12 +155,7 @@ export const CampaignStudioView: React.FC<CampaignStudioViewProps> = ({
   };
 
   const triggerDownload = (url: string, filename: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadMediaFile(url, filename);
   };
 
   const activeVideo = video || localVideo;

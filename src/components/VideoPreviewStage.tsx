@@ -1,3 +1,4 @@
+import { downloadMediaFile } from "../utils/mobileDownload";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Download,
@@ -111,12 +112,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     .slice(0, 42);
 
   const triggerDownload = (url: string, filename: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadMediaFile(url, filename);
   };
 
   return (

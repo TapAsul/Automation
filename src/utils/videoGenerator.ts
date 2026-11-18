@@ -109,9 +109,10 @@ function pickSupportedMimeType(hasAudio: boolean): {
 } {
   const candidates: Array<{ mime: string; ext: "mp4" | "webm" }> = hasAudio
     ? [
+        { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
+        { mime: "video/mp4", ext: "mp4" },
         { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
         { mime: "video/webm;codecs=vp8,opus", ext: "webm" },
-        { mime: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
         { mime: "video/webm", ext: "webm" },
       ]
     : [
