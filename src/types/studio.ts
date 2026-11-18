@@ -159,6 +159,7 @@ export interface GeneratedVideoResult {
   mimeType: string;
   extension: "mp4" | "webm";
   durationSec: number;
+  hasVoiceover?: boolean;
   resolution?: string;
   engine?: "gemini_omni" | "local_compositor" | "google_flow_upload";
   jobId?: string;

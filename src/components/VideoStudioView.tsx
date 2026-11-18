@@ -205,6 +205,8 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
     const el = showcaseVideoRef.current;
     if (!el) return;
     if (el.paused || el.ended) {
+      el.muted = false;
+      el.volume = 1;
       await el.play().catch(() => {});
     } else {
       el.pause();
@@ -1016,7 +1018,7 @@ export const VideoStudioView: React.FC<VideoStudioViewProps> = ({
                 </h3>
                 <p className="text-xs font-mono tabular-nums text-slate-400 mt-0.5">
                   {displayedShowcaseVideo
-                    ? `${displayedShowcaseVideo.engine === "gemini_omni" ? "AI Video Showcase (MP4)" : `Exact Product Showcase (${motionPreset})`} · ${displayedShowcaseVideo.durationSec.toFixed(1)}s`
+                    ? `${displayedShowcaseVideo.engine === "gemini_omni" ? "AI Video Showcase (MP4)" : `Exact Product Showcase (${motionPreset})`} · ${displayedShowcaseVideo.durationSec.toFixed(1)}s${displayedShowcaseVideo.hasVoiceover ? " · Voiceover Connected" : ""}`
                     : isVertical
                       ? "9:16 Vertical · 30 FPS Target"
                       : "16:9 Widescreen · 30 FPS Target"}

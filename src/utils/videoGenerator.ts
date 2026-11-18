@@ -420,7 +420,8 @@ async function renderAudioToBuffer(
   const offline = new OfflineAudioContext(channels, totalFrames, sampleRate);
   const srcNode = offline.createBufferSource();
   srcNode.buffer = source;
-  if (source.duration > durationSec - 0.05) {
+  srcNode.playbackRate.value = Math.max(1, source.duration / (durationSec - 0.25));
+  if (source.duration / srcNode.playbackRate.value > durationSec - 0.05) {
     const fade = offline.createGain();
     fade.gain.setValueAtTime(1, Math.max(0, durationSec - 0.3));
     fade.gain.linearRampToValueAtTime(0.001, durationSec);
@@ -620,6 +621,7 @@ async function tryEncodeFastStartMp4WithWebCodecs(opts: {
     }
 
     const includeAudio = Boolean(audioChoice && audioChunks.length > 0);
+    if (audioBuffer && !includeAudio) return null;
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({
       target,
@@ -730,6 +732,7 @@ async function tryEncodeFastStartMp4WithWebCodecs(opts: {
       durationSec: exactDurationSec,
       resolution: `${width}x${height}`,
       engine: "local_compositor",
+      hasVoiceover: Boolean(audioBuffer),
     };
   } catch {
     if (videoEncoder && videoEncoder.state !== "closed") {
@@ -1105,11 +1108,13 @@ export async function renderShowcaseVideo(
     if (audioCtx.state === "suspended") {
       await audioCtx.resume().catch(() => {});
     }
+    if (audioCtx.state !== "running") throw new Error("Audio is blocked. Tap Render again to enable audio.");
     const dest = audioCtx.createMediaStreamDestination();
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 1.0;
     audioSource = audioCtx.createBufferSource();
     audioSource.buffer = decodedAudio;
+    audioSource.playbackRate.value = Math.max(1, decodedAudio.duration / (durationSec - 0.25));
     audioSource.connect(gainNode);
     gainNode.connect(dest);
     for (const track of dest.stream.getAudioTracks()) {
@@ -1198,8 +1203,9 @@ export async function renderShowcaseVideo(
           durationSec,
           resolution: `${width}x${height}`,
           engine: "local_compositor",
+          hasVoiceover: hasAudioTrack,
         });
-      })();
+      })().catch(reject);
     };
 
     recorder.onerror = () => {
